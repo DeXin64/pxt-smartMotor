@@ -1,6 +1,7 @@
 //% color=#ff0011 icon="\uf1b9" block="Smart Motor"
 namespace smartMotor {
     const I2C_ADDRESS = 0x10
+    const I2C_COMMAND_DELAY_MS = 1
     const COMMAND_REGISTER_READ = 0x01
     const COMMAND_VERSION = 0x10
     const COMMAND_SET_SPEED = 0x20
@@ -150,24 +151,19 @@ namespace smartMotor {
         return result
     }
 
-    /** 将一个字节写入缓冲区。 */
-    function writeU8(buffer: Buffer, offset: number, value: number): void {
-        buffer[offset] = value & 0xFF
+    /** 将16位值按小端写入参数数组。 */
+    function writeU16Le(values: number[], offset: number, value: number): void {
+        values[offset] = value & 0xFF
+        values[offset + 1] = (value >> 8) & 0xFF
     }
 
-    /** 将16位值按小端写入缓冲区。 */
-    function writeU16Le(buffer: Buffer, offset: number, value: number): void {
-        buffer[offset] = value & 0xFF
-        buffer[offset + 1] = (value >> 8) & 0xFF
-    }
-
-    /** 将32位值按小端写入缓冲区。 */
-    function writeI32Le(buffer: Buffer, offset: number, value: number): void {
+    /** 将32位值按小端写入参数数组。 */
+    function writeI32Le(values: number[], offset: number, value: number): void {
         let integerValue = Math.round(value)
-        buffer[offset] = integerValue & 0xFF
-        buffer[offset + 1] = (integerValue >> 8) & 0xFF
-        buffer[offset + 2] = (integerValue >> 16) & 0xFF
-        buffer[offset + 3] = (integerValue >> 24) & 0xFF
+        values[offset] = integerValue & 0xFF
+        values[offset + 1] = (integerValue >> 8) & 0xFF
+        values[offset + 2] = (integerValue >> 16) & 0xFF
+        values[offset + 3] = (integerValue >> 24) & 0xFF
     }
 
     /** 从小端字节流读取无符号16位值。 */
@@ -205,18 +201,31 @@ namespace smartMotor {
         return value
     }
 
-    /** 发送统一I2C帧并读取、校验统一回复帧。 */
-    function transact(command: number, payload: Buffer, maxReplyPayload: number): Buffer {
-        let frame = pins.createBuffer(payload.length + 4)
+    /** 按参考工程方式忙等待短暂的I2C从机响应准备时间。 */
+    function delayMs(ms: number): void {
+        let endTime = input.runningTime() + ms
+        while (endTime > input.runningTime()) {
+        }
+    }
+
+    /** 构造并发送统一I2C命令帧，发送后等待下位机准备回复。 */
+    function i2cCommandSend(command: number, params: number[]): void {
+        let frame = pins.createBuffer(params.length + 4)
         frame[0] = 0xFF
         frame[1] = 0xF9
         frame[2] = command
-        frame[3] = payload.length
-        for (let index = 0; index < payload.length; index++) {
-            frame[index + 4] = payload[index]
+        frame[3] = params.length
+        for (let index = 0; index < params.length; index++) {
+            frame[index + 4] = params[index]
         }
-        acquireI2c()
         pins.i2cWriteBuffer(I2C_ADDRESS, frame)
+        delayMs(I2C_COMMAND_DELAY_MS)
+    }
+
+    /** 发送统一I2C帧并读取、校验统一回复帧。 */
+    function transact(command: number, payload: number[], maxReplyPayload: number): Buffer {
+        acquireI2c()
+        i2cCommandSend(command, payload)
         let rawReply = pins.i2cReadBuffer(I2C_ADDRESS, maxReplyPayload + 4)
         releaseI2c()
         if (rawReply.length < 4
@@ -235,7 +244,7 @@ namespace smartMotor {
     }
 
     /** 发送电机控制帧并保存即时接收结果。 */
-    function sendControl(command: number, payload: Buffer, transactionId: number): boolean {
+    function sendControl(command: number, payload: number[], transactionId: number): boolean {
         let reply = transact(command, payload, 2)
         if (reply.length != 2) {
             lastAcceptStatusValue = 0xFF
@@ -251,7 +260,7 @@ namespace smartMotor {
             return false
         }
         let transactionId = nextTransactionId()
-        let payload = pins.createBuffer(2 + motors.length * 3)
+        let payload: number[] = []
         payload[0] = transactionId
         payload[1] = motors.length
         for (let index = 0; index < motors.length; index++) {
@@ -275,7 +284,7 @@ namespace smartMotor {
             return false
         }
         let transactionId = nextTransactionId()
-        let payload = pins.createBuffer(2 + motors.length * 8)
+        let payload: number[] = []
         payload[0] = transactionId
         payload[1] = motors.length
         for (let index = 0; index < motors.length; index++) {
@@ -301,7 +310,7 @@ namespace smartMotor {
             return false
         }
         let transactionId = nextTransactionId()
-        let payload = pins.createBuffer(2 + motors.length * 8)
+        let payload: number[] = []
         payload[0] = transactionId
         payload[1] = motors.length
         for (let index = 0; index < motors.length; index++) {
@@ -320,18 +329,14 @@ namespace smartMotor {
     /** 发送带事务ID和电机掩码的停止或归零命令。 */
     function sendMaskCommand(command: number, motorMask: number): boolean {
         let transactionId = nextTransactionId()
-        let payload = pins.createBuffer(2)
-        payload[0] = transactionId
-        payload[1] = motorMask & 0x0F
+        let payload = [transactionId, motorMask & 0x0F]
         return sendControl(command, payload, transactionId)
     }
 
     /** 按地址读取最多17字节下位机寄存器。 */
     function readRegisters(startAddress: number, length: number): Buffer {
         let requestLength = clamp(Math.round(length), 1, 17)
-        let payload = pins.createBuffer(2)
-        payload[0] = startAddress
-        payload[1] = requestLength
+        let payload = [startAddress, requestLength]
         let reply = transact(COMMAND_REGISTER_READ, payload, requestLength + 3)
         if (reply.length < 3 || reply[1] != startAddress || reply[2] > requestLength) {
             return pins.createBuffer(0)
@@ -366,7 +371,7 @@ namespace smartMotor {
     }
 
     //% group="Single motor"
-    //% block="set %motor speed to %speed\%"
+    //% block="set %motor speed to %speed\\%"
     //% speed.min=-100 speed.max=100
     //% weight=100
     /** 设置单路电机有符号速度并立即启动。 */
@@ -386,7 +391,7 @@ namespace smartMotor {
     }
 
     //% group="Single motor"
-    //% block="move %motor at %speed\% %direction for %value %mode || %delayMode"
+    //% block="move %motor at %speed\\% %direction for %value %mode || %delayMode"
     //% speed.min=1 speed.max=100 value.min=0
     //% inlineInputMode=inline
     //% weight=98
@@ -487,7 +492,7 @@ namespace smartMotor {
     }
 
     //% group="Combined motors"
-    //% block="move %direction at %speed\% speed"
+    //% block="move %direction at %speed\\% speed"
     //% speed.min=0 speed.max=100
     //% weight=79
     /** 一条I2C命令同时启动左右电机前进或后退。 */
@@ -499,7 +504,7 @@ namespace smartMotor {
     }
 
     //% group="Combined motors"
-    //% block="set left speed %leftSpeed\% and right speed %rightSpeed\%"
+    //% block="set left speed %leftSpeed\\% and right speed %rightSpeed\\%"
     //% leftSpeed.min=-100 leftSpeed.max=100 rightSpeed.min=-100 rightSpeed.max=100
     //% weight=78
     /** 一条I2C命令设置左右轮独立有符号速度。 */
@@ -546,7 +551,7 @@ namespace smartMotor {
     }
 
     //% group="Combined motors"
-    //% block="move %direction at %speed\% for %value %unit"
+    //% block="move %direction at %speed\\% for %value %unit"
     //% speed.min=1 speed.max=100 value.min=0
     //% inlineInputMode=inline
     //% weight=73
@@ -583,7 +588,7 @@ namespace smartMotor {
     }
 
     //% group="Combined motors"
-    //% block="rotate combined motors %angle degrees at %speed\% speed"
+    //% block="rotate combined motors %angle degrees at %speed\\% speed"
     //% speed.min=1 speed.max=100
     //% weight=72
     /** 一条I2C命令同时控制左右轮完成原地旋转。 */
@@ -629,7 +634,7 @@ namespace smartMotor {
     //% weight=58
     /** 读取下位机固件版本。 */
     export function readVersion(): string {
-        let payload = pins.createBuffer(0)
+        let payload: number[] = []
         let reply = transact(COMMAND_VERSION, payload, 3)
         if (reply.length != 3) {
             return "V ?.?.?"
