@@ -1,6 +1,6 @@
 //% color=#ff0011 icon="\uf1b9" block="Smart Motor"
 namespace smartMotor {
-    const I2C_ADDRESS = 0x10
+    const I2C_ADDRESS = 0x66
     const I2C_COMMAND_DELAY_MS = 1
     const COMMAND_REGISTER_READ = 0x01
     const COMMAND_VERSION = 0x10
@@ -14,6 +14,21 @@ namespace smartMotor {
     const REGISTER_ACCELERATION_START = 0x0F
     const REGISTER_MOTOR_ONLINE_MASK = 0x15
     const REGISTER_MOTOR_ERROR_START = 0x16
+    const REGISTER_MOTOR_TELEMETRY_START = 0x1A
+    const MOTOR_TELEMETRY_RECORD_LENGTH = 9
+    const MOTOR_TELEMETRY_ANGLE_VALID = 0x01
+    const MOTOR_TELEMETRY_SPEED_VALID = 0x02
+    const MOTOR_TELEMETRY_ANGLE_OFFSET = 1
+    const MOTOR_TELEMETRY_SPEED_OFFSET = 5
+    const MOTOR_TELEMETRY_ANGLE_SEQUENCE_OFFSET = 7
+    const MOTOR_TELEMETRY_SPEED_SEQUENCE_OFFSET = 8
+    const MOTION_START_DELAY_MS = 100
+    const MOTION_POLL_INTERVAL_MS = 20
+    const MOTION_TARGET_TOLERANCE_X10 = 10
+    const MOTION_START_ANGLE_DELTA_X10 = 5
+    const MOTION_STOP_SAMPLE_COUNT = 2
+    const MOTION_MIN_TIMEOUT_MS = 2000
+    const MOTION_MAX_TIMEOUT_MS = 60000
     const REPLY_STATUS_ACCEPTED = 0
 
     /** 电机接口位置。 */
@@ -86,7 +101,7 @@ namespace smartMotor {
         Inch = 2
     }
 
-    /** 是否在积木返回前按运动参数进行估算等待。 */
+    /** 是否在积木返回前等待电机反馈表明运动已经完成。 */
     export enum DelayMode {
         //% block="wait"
         Wait = 1,
@@ -355,6 +370,142 @@ namespace smartMotor {
         return Math.round(value * 10)
     }
 
+    /** 读取单路电机的有效标志、累计角度、速度和两个更新序列。 */
+    function readMotorTelemetry(motor: MotorPosition): Buffer {
+        if (!validMotor(motor)) {
+            return pins.createBuffer(0)
+        }
+        let startAddress = REGISTER_MOTOR_TELEMETRY_START
+            + (motor - MotorPosition.M1) * MOTOR_TELEMETRY_RECORD_LENGTH
+        return readRegisters(startAddress, MOTOR_TELEMETRY_RECORD_LENGTH)
+    }
+
+    /** 将任意0.1度角度归一化到0～3599。 */
+    function normalizeAngleX10(angleX10: number): number {
+        let normalized = angleX10 % 3600
+        if (normalized < 0) {
+            normalized += 3600
+        }
+        return normalized
+    }
+
+    /** 返回两个单圈角度之间的最小绝对差，单位为0.1度。 */
+    function absoluteAngleErrorX10(currentX10: number, targetX10: number): number {
+        let difference = Math.abs(normalizeAngleX10(currentX10) - normalizeAngleX10(targetX10))
+        return Math.min(difference, 3600 - difference)
+    }
+
+    /** 按下位机相同的方向规则计算绝对角度命令预计经过的角度。 */
+    function absoluteTravelX10(currentX10: number, targetX10: number, turnMode: AbsoluteTurnMode): number {
+        let current = normalizeAngleX10(currentX10)
+        let target = normalizeAngleX10(targetX10)
+        let clockwise = (target + 3600 - current) % 3600
+        let counterClockwise = (current + 3600 - target) % 3600
+        if (turnMode == AbsoluteTurnMode.CW) {
+            return clockwise
+        }
+        if (turnMode == AbsoluteTurnMode.CCW) {
+            return counterClockwise
+        }
+        return Math.min(clockwise, counterClockwise)
+    }
+
+    /** 根据运动量和速度生成带余量且有上下限的反馈等待超时。 */
+    function motionTimeoutMs(valueX10: number, mode: MoveMode, speedValue: number): number {
+        let estimatedMs = 0
+        if (mode == MoveMode.Second) {
+            estimatedMs = Math.abs(valueX10) * 100
+        } else {
+            estimatedMs = Math.abs(valueX10) * 100 / clamp(speedValue, 1, 900)
+        }
+        return clamp(Math.round(estimatedMs * 2 + 2000), MOTION_MIN_TIMEOUT_MS, MOTION_MAX_TIMEOUT_MS)
+    }
+
+    /**
+     * 启动后等待100ms，再用新速度样本、角度变化和目标角差判断单路运动完成。
+     * 更新序列用于排除寄存器重复快照；反馈中断时最多等待计算出的超时时间。
+     */
+    function waitForMotorFeedback(motor: MotorPosition, startTelemetry: Buffer, mode: MoveMode, commandValueX10: number, speedValue: number, absoluteTargetX10: number, turnMode: AbsoluteTurnMode): void {
+        let startAngleValid = false
+        let startAngleX10 = 0
+        let lastAngleSequence = -1
+        let lastSpeedSequence = -1
+        if (startTelemetry.length == MOTOR_TELEMETRY_RECORD_LENGTH) {
+            startAngleValid = (startTelemetry[0] & MOTOR_TELEMETRY_ANGLE_VALID) != 0
+            if (startAngleValid) {
+                startAngleX10 = readI32Le(startTelemetry, MOTOR_TELEMETRY_ANGLE_OFFSET)
+            }
+            lastAngleSequence = startTelemetry[MOTOR_TELEMETRY_ANGLE_SEQUENCE_OFFSET]
+            lastSpeedSequence = startTelemetry[MOTOR_TELEMETRY_SPEED_SEQUENCE_OFFSET]
+        }
+        let absoluteTarget = absoluteTargetX10 >= 0
+        let targetAngleValid = absoluteTarget || (startAngleValid && mode != MoveMode.Second)
+        let targetAngleX10 = absoluteTarget
+            ? normalizeAngleX10(absoluteTargetX10)
+            : startAngleX10 + commandValueX10
+        let expectedValueX10 = Math.abs(commandValueX10)
+        let timeoutMode = mode
+        if (absoluteTarget) {
+            timeoutMode = MoveMode.Degree
+            expectedValueX10 = startAngleValid
+                ? absoluteTravelX10(startAngleX10, targetAngleX10, turnMode)
+                : 3600
+        }
+        let timeoutMs = motionTimeoutMs(expectedValueX10, timeoutMode, speedValue)
+        let waitStartMs = input.runningTime()
+        let referenceAngleValid = startAngleValid
+        let referenceAngleX10 = startAngleX10
+        let motionObserved = false
+        let targetReached = false
+        let stoppedSamples = 0
+        basic.pause(MOTION_START_DELAY_MS)
+        while (input.runningTime() - waitStartMs < timeoutMs) {
+            let telemetry = readMotorTelemetry(motor)
+            if (telemetry.length == MOTOR_TELEMETRY_RECORD_LENGTH) {
+                let flags = telemetry[0]
+                let angleSequence = telemetry[MOTOR_TELEMETRY_ANGLE_SEQUENCE_OFFSET]
+                if ((flags & MOTOR_TELEMETRY_ANGLE_VALID) != 0
+                    && angleSequence != lastAngleSequence) {
+                    let currentAngleX10 = readI32Le(telemetry, MOTOR_TELEMETRY_ANGLE_OFFSET)
+                    lastAngleSequence = angleSequence
+                    if (!referenceAngleValid) {
+                        referenceAngleValid = true
+                        referenceAngleX10 = currentAngleX10
+                    } else if (Math.abs(currentAngleX10 - referenceAngleX10)
+                        >= MOTION_START_ANGLE_DELTA_X10) {
+                        motionObserved = true
+                    }
+                    if (targetAngleValid) {
+                        let targetErrorX10 = absoluteTarget
+                            ? absoluteAngleErrorX10(currentAngleX10, targetAngleX10)
+                            : Math.abs(currentAngleX10 - targetAngleX10)
+                        targetReached = targetErrorX10 <= MOTION_TARGET_TOLERANCE_X10
+                    }
+                }
+                let speedSequence = telemetry[MOTOR_TELEMETRY_SPEED_SEQUENCE_OFFSET]
+                if ((flags & MOTOR_TELEMETRY_SPEED_VALID) != 0
+                    && speedSequence != lastSpeedSequence) {
+                    let currentSpeed = readI16Le(telemetry, MOTOR_TELEMETRY_SPEED_OFFSET)
+                    lastSpeedSequence = speedSequence
+                    if (currentSpeed == 0) {
+                        stoppedSamples++
+                    } else {
+                        stoppedSamples = 0
+                        motionObserved = true
+                    }
+                }
+                if (stoppedSamples >= MOTION_STOP_SAMPLE_COUNT
+                    && (motionObserved || targetReached
+                        || (mode == MoveMode.Second
+                            && input.runningTime() - waitStartMs
+                                >= Math.abs(commandValueX10) * 100))) {
+                    return
+                }
+            }
+            basic.pause(MOTION_POLL_INTERVAL_MS)
+        }
+    }
+
     /** 按参考工程的速度和运动量估算积木等待时间。 */
     function waitForEstimatedMotion(value: number, mode: MoveMode, speedPercent: number): void {
         let speed = clamp(speedPercent, 1, 100) * 9
@@ -405,9 +556,14 @@ namespace smartMotor {
         if (direction == MovementDirection.CCW) {
             signedValue = -signedValue
         }
+        let startTelemetry = pins.createBuffer(0)
+        if (delayMode == DelayMode.Wait) {
+            startTelemetry = readMotorTelemetry(motor)
+        }
         if (sendMoveBatch([motor], [mode], [signedValue], [servoSpeedValue])
             && delayMode == DelayMode.Wait) {
-            waitForEstimatedMotion(value, mode, limitedSpeed)
+            waitForMotorFeedback(motor, startTelemetry, mode, signedValue,
+                servoSpeedValue, -1, AbsoluteTurnMode.ShortestPath)
         }
     }
 
@@ -426,9 +582,14 @@ namespace smartMotor {
             normalized += 360
         }
         normalized = normalized % 360
+        let startTelemetry = pins.createBuffer(0)
+        if (delayMode == DelayMode.Wait) {
+            startTelemetry = readMotorTelemetry(motor)
+        }
         if (sendAbsoluteBatch([motor], [turnMode], [Math.round(normalized * 10)], [servoSpeedValue])
             && delayMode == DelayMode.Wait) {
-            basic.pause(500)
+            waitForMotorFeedback(motor, startTelemetry, MoveMode.Degree, 0,
+                servoSpeedValue, Math.round(normalized * 10), turnMode)
         }
     }
 
@@ -636,7 +797,7 @@ namespace smartMotor {
         let payload: number[] = []
         let reply = transact(COMMAND_VERSION, payload, 3)
         if (reply.length != 3) {
-            return "V ?.?.?"
+            return "V 0.0.0"
         }
         return "V " + reply[0] + "." + reply[1] + "." + reply[2]
     }
