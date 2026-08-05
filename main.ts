@@ -151,21 +151,6 @@ namespace smartMotor {
         return result
     }
 
-    /** 将16位值按小端写入参数数组。 */
-    function writeU16Le(values: number[], offset: number, value: number): void {
-        values[offset] = value & 0xFF
-        values[offset + 1] = (value >> 8) & 0xFF
-    }
-
-    /** 将32位值按小端写入参数数组。 */
-    function writeI32Le(values: number[], offset: number, value: number): void {
-        let integerValue = Math.round(value)
-        values[offset] = integerValue & 0xFF
-        values[offset + 1] = (integerValue >> 8) & 0xFF
-        values[offset + 2] = (integerValue >> 16) & 0xFF
-        values[offset + 3] = (integerValue >> 24) & 0xFF
-    }
-
     /** 从小端字节流读取无符号16位值。 */
     function readU16Le(buffer: Buffer, offset: number): number {
         return buffer[offset] | (buffer[offset + 1] << 8)
@@ -268,8 +253,10 @@ namespace smartMotor {
                 return false
             }
             let offset = 2 + index * 3
+            let pwmValue = clamp(Math.round(pwmValues[index]), -1000, 1000)
             payload[offset] = motors[index]
-            writeU16Le(payload, offset + 1, clamp(Math.round(pwmValues[index]), -1000, 1000))
+            payload[offset + 1] = pwmValue & 0xFF
+            payload[offset + 2] = (pwmValue >> 8) & 0xFF
         }
         return sendControl(COMMAND_SET_SPEED, payload, transactionId)
     }
@@ -292,10 +279,16 @@ namespace smartMotor {
                 return false
             }
             let offset = 2 + index * 8
+            let movementValue = Math.round(valuesX10[index])
+            let speedValue = clamp(Math.round(speeds[index]), 1, 900)
             payload[offset] = motors[index]
             payload[offset + 1] = modes[index]
-            writeI32Le(payload, offset + 2, valuesX10[index])
-            writeU16Le(payload, offset + 6, clamp(Math.round(speeds[index]), 1, 900))
+            payload[offset + 2] = movementValue & 0xFF
+            payload[offset + 3] = (movementValue >> 8) & 0xFF
+            payload[offset + 4] = (movementValue >> 16) & 0xFF
+            payload[offset + 5] = (movementValue >> 24) & 0xFF
+            payload[offset + 6] = speedValue & 0xFF
+            payload[offset + 7] = (speedValue >> 8) & 0xFF
         }
         return sendControl(COMMAND_MOVE, payload, transactionId)
     }
@@ -318,10 +311,16 @@ namespace smartMotor {
                 return false
             }
             let offset = 2 + index * 8
+            let targetValue = Math.round(targetsX10[index])
+            let speedValue = clamp(Math.round(speeds[index]), 1, 900)
             payload[offset] = motors[index]
             payload[offset + 1] = turnModes[index]
-            writeI32Le(payload, offset + 2, targetsX10[index])
-            writeU16Le(payload, offset + 6, clamp(Math.round(speeds[index]), 1, 900))
+            payload[offset + 2] = targetValue & 0xFF
+            payload[offset + 3] = (targetValue >> 8) & 0xFF
+            payload[offset + 4] = (targetValue >> 16) & 0xFF
+            payload[offset + 5] = (targetValue >> 24) & 0xFF
+            payload[offset + 6] = speedValue & 0xFF
+            payload[offset + 7] = (speedValue >> 8) & 0xFF
         }
         return sendControl(COMMAND_MOVE_ABSOLUTE, payload, transactionId)
     }
