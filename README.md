@@ -1,24 +1,30 @@
+# pxt-smartmotor
 
-> 在 [https://zy2516.github.io/pxt-smartmotor/](https://zy2516.github.io/pxt-smartmotor/) 打开此页面
+智控马达扩展盒的MakeCode扩展，上位机通过7位I2C地址`0x10`与N32G401下位机通信。
+
+## 功能
+
+- 四路单电机有符号速度、停止、定圈、定度和定时运动；
+- 绝对角度、物理位置归零和下位机相对角度归零；
+- 一条I2C指令同时控制左右两个电机；
+- 板载陀螺仪三轴累计角度、三轴加速度、四路电机在线状态和逐路错误码读取；
+- 组合运动、距离换算和原地旋转；
+- 固件版本读取。
+
+PID积木和PID控制功能不在本扩展中实现。
+
+控制协议统一为：
+
+```text
+FF F9 command length payload
+```
+
+下位机回复使用相同帧格式。组合电机命令会作为一个批次整体入队，任意目标电机离线时整批拒绝；停止命令拥有最高优先级并取消目标电机尚未执行的运动命令。
 
 ## 用作扩展
 
-此仓库可以作为 **插件** 添加到 MakeCode 中。
+在MakeCode micro:bit的“扩展”页面搜索或导入：
 
-* 打开 [https://makecode.microbit.org/](https://makecode.microbit.org/)
-* 点击 **新项目**
-* 点击齿轮图标菜单下的 **扩展**
-* 搜索 **https://github.com/zy2516/pxt-smartmotor** 并导入
-
-## 编辑此项目
-
-在 MakeCode 中编辑此仓库。
-
-* 打开 [https://makecode.microbit.org/](https://makecode.microbit.org/)
-* 点击 **导入**，然后点击 **导入 URL**
-* 粘贴 **https://github.com/zy2516/pxt-smartmotor** 并点击导入
-
-#### 元数据（用于搜索、渲染）
-
-* for PXT/microbit
-<script src="https://makecode.com/gh-pages-embed.js"></script><script>makeCodeRender("{{ site.makecode.home_url }}", "{{ site.github.owner_name }}/{{ site.github.repository_name }}");</script>
+```text
+https://github.com/zy2516/pxt-smartmotor
+```
