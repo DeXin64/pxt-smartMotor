@@ -23,7 +23,13 @@
         "**/.pxt": true
     },
     "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/.DS_Store": true,
+        "**/Thumbs.db": true,
         "**/pxt_modules": true,
         "**/.pxt": true
-    }
+    },
+    "hide-files.files": []
 }

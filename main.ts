@@ -4,6 +4,7 @@ namespace smartMotor {
     const I2C_COMMAND_DELAY_MS = 1
     const I2C_REGISTER_PREPARE_DELAY_MS = 2
     const COMMAND_REGISTER_READ = 0x01
+    const COMMAND_MOTOR_DATA_REFRESH = 0x02
     const COMMAND_VERSION = 0x10
     const COMMAND_SET_SPEED = 0x20
     const COMMAND_STOP = 0x21
@@ -11,18 +12,24 @@ namespace smartMotor {
     const COMMAND_MOVE_ABSOLUTE = 0x23
     const COMMAND_RESET_PHYSICAL = 0x24
     const COMMAND_RESET_RELATIVE = 0x25
+    const COMMAND_ROBOT_SET_SPEED = 0x26
+    const COMMAND_ROBOT_MOVE = 0x27
     const REGISTER_GYRO_ANGLE_START = 0x03
     const REGISTER_ACCELERATION_START = 0x0F
     const REGISTER_MOTOR_ERROR_START = 0x15
-    const REGISTER_MOTOR_TELEMETRY_START = 0x19
-    const MOTOR_TELEMETRY_RECORD_LENGTH = 13
-    const MOTOR_TELEMETRY_ANGLE_VALID = 0x01
-    const MOTOR_TELEMETRY_SPEED_VALID = 0x02
-    const MOTOR_TELEMETRY_RELATIVE_ANGLE_OFFSET = 1
-    const MOTOR_TELEMETRY_ABSOLUTE_ANGLE_OFFSET = 5
-    const MOTOR_TELEMETRY_SPEED_OFFSET = 9
-    const MOTOR_TELEMETRY_ANGLE_SEQUENCE_OFFSET = 11
-    const MOTOR_TELEMETRY_SPEED_SEQUENCE_OFFSET = 12
+    const REGISTER_MOTOR_DATA_START = 0x19
+    const MOTOR_DATA_RECORD_LENGTH = 13
+    const MOTOR_DATA_ANGLE_VALID = 0x01
+    const MOTOR_DATA_SPEED_VALID = 0x02
+    const MOTOR_DATA_RELATIVE_ANGLE_OFFSET = 1
+    const MOTOR_DATA_ABSOLUTE_ANGLE_OFFSET = 5
+    const MOTOR_DATA_SPEED_OFFSET = 9
+    const MOTOR_DATA_ANGLE_SEQUENCE_OFFSET = 11
+    const MOTOR_DATA_SPEED_SEQUENCE_OFFSET = 12
+    const MOTOR_DATA_REFRESH_ANGLE = 0x01
+    const MOTOR_DATA_REFRESH_SPEED = 0x02
+    const MOTOR_DATA_REFRESH_TIMEOUT_MS = 1000
+    const MOTOR_DATA_REFRESH_POLL_INTERVAL_MS = 5
     const MOTION_START_DELAY_MS = 100
     const MOTION_POLL_INTERVAL_MS = 20
     const MOTION_TARGET_TOLERANCE_X10 = 10
@@ -35,7 +42,6 @@ namespace smartMotor {
     const RESET_WAIT_TIMEOUT_MS = 5000
     const ROBOT_TURN_TOLERANCE_DEGREES = 1
     const ROBOT_DEFAULT_WHEEL_DIAMETER_MM = 62
-    const REPLY_STATUS_ACCEPTED = 0
 
     /** 电机接口位置。 */
     export enum MotorPort {
@@ -122,46 +128,15 @@ namespace smartMotor {
         Z = 2
     }
 
-    let i2cLocked = false
-    let nextTransactionIdValue = 1
-    let lastAcceptStatusValue = 0
     let robotLeftMotor = MotorPort.M1
     let robotRightMotor = MotorPort.M2
     let robotWheelDiameterMm = ROBOT_DEFAULT_WHEEL_DIAMETER_MM
-    let robotMotionGeneration = 0
+    let robotMotionId = 0
     let robotTurnActive = false
-
-    /** 等待并独占本扩展的I2C写读组合，避免MakeCode多个fiber相互插入。 */
-    function acquireI2c(): void {
-        while (i2cLocked) {
-            basic.pause(1)
-        }
-        i2cLocked = true
-    }
-
-    /** 释放本扩展的I2C访问权。 */
-    function releaseI2c(): void {
-        i2cLocked = false
-    }
-
-    /** 返回一个自然回绕且不使用0的8位事务ID。 */
-    function nextTransactionId(): number {
-        let result = nextTransactionIdValue
-        nextTransactionIdValue = (nextTransactionIdValue + 1) & 0xFF
-        if (nextTransactionIdValue == 0) {
-            nextTransactionIdValue = 1
-        }
-        return result
-    }
-
-    /** 从小端字节流读取无符号16位值。 */
-    function readU16Le(buffer: Buffer, offset: number): number {
-        return buffer[offset] | (buffer[offset + 1] << 8)
-    }
 
     /** 从小端字节流读取有符号16位值。 */
     function readI16Le(buffer: Buffer, offset: number): number {
-        let value = readU16Le(buffer, offset)
+        let value = buffer[offset] | (buffer[offset + 1] << 8)
         return value >= 0x8000 ? value - 0x10000 : value
     }
 
@@ -173,20 +148,9 @@ namespace smartMotor {
             | (buffer[offset + 3] << 24)
     }
 
-    /** 判断电机号是否处于M1～M4范围。 */
-    function validMotor(motor: number): boolean {
-        return motor >= MotorPort.M1 && motor <= MotorPort.M4
-    }
-
     /** 将速度百分比限制到指定范围并换算为整数。 */
     function clamp(value: number, minimum: number, maximum: number): number {
-        if (value < minimum) {
-            return minimum
-        }
-        if (value > maximum) {
-            return maximum
-        }
-        return value
+        return value < minimum ? minimum : value > maximum ? maximum : value
     }
 
     /** 按参考工程方式忙等待短暂的I2C从机响应准备时间。 */
@@ -196,185 +160,63 @@ namespace smartMotor {
         }
     }
 
-    /** 构造并发送统一I2C命令帧，按当前业务要求等待下位机准备回复。 */
-    function i2cCommandSend(command: number, params: number[], prepareDelayMs: number): void {
-        let frame = pins.createBuffer(params.length + 4)
+    /** 按Cutebot Pro协议发送一条I2C指令，并忙等待接收或查询数据准备。 */
+    function i2cCommandSend(command: number, data: number[], delay: number = I2C_COMMAND_DELAY_MS): void {
+        let frame = pins.createBuffer(data.length + 4)
         frame[0] = 0xFF
         frame[1] = 0xF9
         frame[2] = command
-        frame[3] = params.length
-        for (let index = 0; index < params.length; index++) {
-            frame[index + 4] = params[index]
+        frame[3] = data.length
+        for (let index = 0; index < data.length; index++) {
+            frame[index + 4] = data[index]
         }
         pins.i2cWriteBuffer(I2C_ADDRESS, frame)
-        delayMs(prepareDelayMs)
+        delayMs(delay)
     }
 
-    /** 发送统一I2C帧并读取、校验统一回复帧。 */
-    function transact(command: number, payload: number[], maxReplyPayload: number, prepareDelayMs: number = I2C_COMMAND_DELAY_MS): Buffer {
-        acquireI2c()
-        i2cCommandSend(command, payload, prepareDelayMs)
-        let rawReply = pins.i2cReadBuffer(I2C_ADDRESS, maxReplyPayload + 4)
-        releaseI2c()
-        if (rawReply.length < 4
-            || rawReply[0] != 0xFF
-            || rawReply[1] != 0xF9
-            || rawReply[2] != command
-            || rawReply[3] > maxReplyPayload) {
-            return pins.createBuffer(0)
-        }
-        let replyLength = rawReply[3]
-        let reply = pins.createBuffer(replyLength)
-        for (let index = 0; index < replyLength; index++) {
-            reply[index] = rawReply[index + 4]
-        }
-        return reply
-    }
-
-    /** 发送电机控制帧并保存即时接收结果。 */
-    function sendControl(command: number, payload: number[], transactionId: number): boolean {
-        let reply = transact(command, payload, 2)
-        if (reply.length != 2) {
-            lastAcceptStatusValue = 0xFF
-            return false
-        }
-        lastAcceptStatusValue = reply[0]
-        return reply[0] == REPLY_STATUS_ACCEPTED && reply[1] == transactionId
-    }
-
-    /** 一条I2C事务批量设置最多四路PWM速度。 */
-    function sendSpeedBatch(motors: number[], pwmValues: number[]): boolean {
-        if (motors.length == 0 || motors.length != pwmValues.length || motors.length > 4) {
-            return false
-        }
-        let transactionId = nextTransactionId()
-        let payload: number[] = []
-        payload[0] = transactionId
-        payload[1] = motors.length
-        for (let index = 0; index < motors.length; index++) {
-            if (!validMotor(motors[index])) {
-                return false
-            }
-            let offset = 2 + index * 3
-            let pwmValue = clamp(Math.round(pwmValues[index]), -1000, 1000)
-            payload[offset] = motors[index]
-            payload[offset + 1] = pwmValue & 0xFF
-            payload[offset + 2] = (pwmValue >> 8) & 0xFF
-        }
-        return sendControl(COMMAND_SET_SPEED, payload, transactionId)
-    }
-
-    /** 一条I2C事务批量发送最多两路定量运动。 */
-    function sendMoveBatch(motors: number[], modes: number[], valuesX10: number[], speeds: number[]): boolean {
-        if (motors.length == 0
-            || motors.length > 2
-            || motors.length != modes.length
-            || motors.length != valuesX10.length
-            || motors.length != speeds.length) {
-            return false
-        }
-        let transactionId = nextTransactionId()
-        let payload: number[] = []
-        payload[0] = transactionId
-        payload[1] = motors.length
-        for (let index = 0; index < motors.length; index++) {
-            if (!validMotor(motors[index])) {
-                return false
-            }
-            let offset = 2 + index * 8
-            let movementValue = Math.round(valuesX10[index])
-            let speedValue = clamp(Math.round(speeds[index]), 1, 900)
-            payload[offset] = motors[index]
-            payload[offset + 1] = modes[index]
-            payload[offset + 2] = movementValue & 0xFF
-            payload[offset + 3] = (movementValue >> 8) & 0xFF
-            payload[offset + 4] = (movementValue >> 16) & 0xFF
-            payload[offset + 5] = (movementValue >> 24) & 0xFF
-            payload[offset + 6] = speedValue & 0xFF
-            payload[offset + 7] = (speedValue >> 8) & 0xFF
-        }
-        return sendControl(COMMAND_MOVE, payload, transactionId)
-    }
-
-    /** 一条I2C事务批量发送最多两路绝对角度运动。 */
-    function sendAbsoluteBatch(motors: number[], turnModes: number[], targetsX10: number[], speeds: number[]): boolean {
-        if (motors.length == 0
-            || motors.length > 2
-            || motors.length != turnModes.length
-            || motors.length != targetsX10.length
-            || motors.length != speeds.length) {
-            return false
-        }
-        let transactionId = nextTransactionId()
-        let payload: number[] = []
-        payload[0] = transactionId
-        payload[1] = motors.length
-        for (let index = 0; index < motors.length; index++) {
-            if (!validMotor(motors[index])) {
-                return false
-            }
-            let offset = 2 + index * 8
-            let targetValue = Math.round(targetsX10[index])
-            let speedValue = clamp(Math.round(speeds[index]), 1, 900)
-            payload[offset] = motors[index]
-            payload[offset + 1] = turnModes[index]
-            payload[offset + 2] = targetValue & 0xFF
-            payload[offset + 3] = (targetValue >> 8) & 0xFF
-            payload[offset + 4] = (targetValue >> 16) & 0xFF
-            payload[offset + 5] = (targetValue >> 24) & 0xFF
-            payload[offset + 6] = speedValue & 0xFF
-            payload[offset + 7] = (speedValue >> 8) & 0xFF
-        }
-        return sendControl(COMMAND_MOVE_ABSOLUTE, payload, transactionId)
-    }
-
-    /** 发送带事务ID和电机掩码的停止或归零命令。 */
-    function sendMaskCommand(command: number, motorMask: number): boolean {
-        let transactionId = nextTransactionId()
-        let payload = [transactionId, motorMask & 0x0F]
-        return sendControl(command, payload, transactionId)
-    }
-
-    /** 通知下位机按需刷新请求范围，等待2ms后读取最多17字节寄存器。 */
+    /** 通知下位机按需刷新请求范围，等待2ms后直接读取原始寄存器。 */
     function readRegisters(startAddress: number, length: number): Buffer {
-        let requestLength = clamp(Math.round(length), 1, 17)
-        let payload = [startAddress, requestLength]
-        let reply = transact(COMMAND_REGISTER_READ, payload, requestLength + 3, I2C_REGISTER_PREPARE_DELAY_MS)
-        if (reply.length < 3 || reply[1] != startAddress || reply[2] > requestLength) {
-            return pins.createBuffer(0)
-        }
-        let result = pins.createBuffer(reply[2])
-        for (let index = 0; index < result.length; index++) {
-            result[index] = reply[index + 3]
-        }
-        return result
-    }
-
-    /** 将运动量换算为下位机统一使用的0.1度或0.1秒值。 */
-    function movementValueX10(value: number, mode: TurnMode): number {
-        if (mode == TurnMode.Circle) {
-            return Math.round(value * 3600)
-        }
-        return Math.round(value * 10)
+        let requestLength = clamp(Math.round(length), 1, 24)
+        i2cCommandSend(COMMAND_REGISTER_READ, [startAddress, requestLength],
+            I2C_REGISTER_PREPARE_DELAY_MS)
+        return pins.i2cReadBuffer(I2C_ADDRESS, requestLength)
     }
 
     /** 读取单路电机的有效标志、相对/绝对角度、速度和更新序列。 */
-    function readMotorTelemetry(motor: MotorPort): Buffer {
-        if (!validMotor(motor)) {
-            return pins.createBuffer(0)
+    function readMotorData(motor: MotorPort): Buffer {
+        let startAddress = REGISTER_MOTOR_DATA_START
+            + (motor - MotorPort.M1) * MOTOR_DATA_RECORD_LENGTH
+        return readRegisters(startAddress, MOTOR_DATA_RECORD_LENGTH)
+    }
+
+    /** 请求下位机刷新单路电机数据，并等待对应更新序列变化。 */
+    function refreshMotorData(motor: MotorPort, dataMask: number): Buffer {
+        let oldData = readMotorData(motor)
+        let oldAngleSequence = oldData.length == MOTOR_DATA_RECORD_LENGTH
+            ? oldData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET] : -1
+        let oldSpeedSequence = oldData.length == MOTOR_DATA_RECORD_LENGTH
+            ? oldData[MOTOR_DATA_SPEED_SEQUENCE_OFFSET] : -1
+        i2cCommandSend(COMMAND_MOTOR_DATA_REFRESH,
+            [(1 << (motor - 1)) & 0x0F, dataMask])
+        let startMs = input.runningTime()
+        while (input.runningTime() - startMs < MOTOR_DATA_REFRESH_TIMEOUT_MS) {
+            let motorData = readMotorData(motor)
+            if (motorData.length == MOTOR_DATA_RECORD_LENGTH
+                && ((dataMask & MOTOR_DATA_REFRESH_ANGLE) == 0
+                    || motorData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET] != oldAngleSequence)
+                && ((dataMask & MOTOR_DATA_REFRESH_SPEED) == 0
+                    || motorData[MOTOR_DATA_SPEED_SEQUENCE_OFFSET] != oldSpeedSequence)) {
+                return motorData
+            }
+            basic.pause(MOTOR_DATA_REFRESH_POLL_INTERVAL_MS)
         }
-        let startAddress = REGISTER_MOTOR_TELEMETRY_START
-            + (motor - MotorPort.M1) * MOTOR_TELEMETRY_RECORD_LENGTH
-        return readRegisters(startAddress, MOTOR_TELEMETRY_RECORD_LENGTH)
+        return pins.createBuffer(0)
     }
 
     /** 将任意0.1度角度归一化到0～3599。 */
     function normalizeAngleX10(angleX10: number): number {
         let normalized = angleX10 % 3600
-        if (normalized < 0) {
-            normalized += 3600
-        }
-        return normalized
+        return normalized < 0 ? normalized + 3600 : normalized
     }
 
     /** 返回两个单圈角度之间的最小绝对差，单位为0.1度。 */
@@ -413,21 +255,21 @@ namespace smartMotor {
      * 启动后等待100ms并确认运动发生；所有模式都以连续新速度样本归零作为
      * 完成条件，角度模式还要求到达目标或运动后角度稳定，由动态超时兜底。
      */
-    function waitForMotorFeedback(motor: MotorPort, startTelemetry: Buffer, mode: TurnMode, commandValueX10: number, speedValue: number, absoluteTargetX10: number, turnMode: TurnDirectionEx): void {
+    function waitForMotorFeedback(motor: MotorPort, startData: Buffer, mode: TurnMode, commandValueX10: number, speedValue: number, absoluteTargetX10: number, turnMode: TurnDirectionEx): void {
         let startAngleValid = false
         let startAngleX10 = 0
         let lastAngleSequence = -1
         let lastSpeedSequence = -1
-        if (startTelemetry.length == MOTOR_TELEMETRY_RECORD_LENGTH) {
-            startAngleValid = (startTelemetry[0] & MOTOR_TELEMETRY_ANGLE_VALID) != 0
+        if (startData.length == MOTOR_DATA_RECORD_LENGTH) {
+            startAngleValid = (startData[0] & MOTOR_DATA_ANGLE_VALID) != 0
             if (startAngleValid) {
-                startAngleX10 = readI32Le(startTelemetry,
+                startAngleX10 = readI32Le(startData,
                     absoluteTargetX10 >= 0
-                        ? MOTOR_TELEMETRY_ABSOLUTE_ANGLE_OFFSET
-                        : MOTOR_TELEMETRY_RELATIVE_ANGLE_OFFSET)
+                        ? MOTOR_DATA_ABSOLUTE_ANGLE_OFFSET
+                        : MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
             }
-            lastAngleSequence = startTelemetry[MOTOR_TELEMETRY_ANGLE_SEQUENCE_OFFSET]
-            lastSpeedSequence = startTelemetry[MOTOR_TELEMETRY_SPEED_SEQUENCE_OFFSET]
+            lastAngleSequence = startData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET]
+            lastSpeedSequence = startData[MOTOR_DATA_SPEED_SEQUENCE_OFFSET]
         }
         let absoluteTarget = absoluteTargetX10 >= 0
         let targetAngleValid = absoluteTarget || (startAngleValid && mode != TurnMode.Second)
@@ -454,16 +296,17 @@ namespace smartMotor {
         let stoppedSamples = 0
         basic.pause(MOTION_START_DELAY_MS)
         while (input.runningTime() - waitStartMs < timeoutMs) {
-            let telemetry = readMotorTelemetry(motor)
-            if (telemetry.length == MOTOR_TELEMETRY_RECORD_LENGTH) {
-                let flags = telemetry[0]
-                let angleSequence = telemetry[MOTOR_TELEMETRY_ANGLE_SEQUENCE_OFFSET]
-                if ((flags & MOTOR_TELEMETRY_ANGLE_VALID) != 0
+            let motorData = refreshMotorData(motor,
+                MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
+            if (motorData.length == MOTOR_DATA_RECORD_LENGTH) {
+                let flags = motorData[0]
+                let angleSequence = motorData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET]
+                if ((flags & MOTOR_DATA_ANGLE_VALID) != 0
                     && angleSequence != lastAngleSequence) {
-                    let currentAngleX10 = readI32Le(telemetry,
+                    let currentAngleX10 = readI32Le(motorData,
                         absoluteTarget
-                            ? MOTOR_TELEMETRY_ABSOLUTE_ANGLE_OFFSET
-                            : MOTOR_TELEMETRY_RELATIVE_ANGLE_OFFSET)
+                            ? MOTOR_DATA_ABSOLUTE_ANGLE_OFFSET
+                            : MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
                     lastAngleSequence = angleSequence
                     if (!referenceAngleValid) {
                         referenceAngleValid = true
@@ -474,7 +317,7 @@ namespace smartMotor {
                     }
                     if (previousAngleValid
                         && Math.abs(currentAngleX10 - previousAngleX10)
-                            <= MOTION_STABLE_ANGLE_DELTA_X10) {
+                        <= MOTION_STABLE_ANGLE_DELTA_X10) {
                         stableAngleSamples++
                     } else {
                         stableAngleSamples = 0
@@ -488,10 +331,10 @@ namespace smartMotor {
                         targetReached = targetErrorX10 <= MOTION_TARGET_TOLERANCE_X10
                     }
                 }
-                let speedSequence = telemetry[MOTOR_TELEMETRY_SPEED_SEQUENCE_OFFSET]
-                if ((flags & MOTOR_TELEMETRY_SPEED_VALID) != 0
+                let speedSequence = motorData[MOTOR_DATA_SPEED_SEQUENCE_OFFSET]
+                if ((flags & MOTOR_DATA_SPEED_VALID) != 0
                     && speedSequence != lastSpeedSequence) {
-                    let currentSpeed = readI16Le(telemetry, MOTOR_TELEMETRY_SPEED_OFFSET)
+                    let currentSpeed = readI16Le(motorData, MOTOR_DATA_SPEED_OFFSET)
                     lastSpeedSequence = speedSequence
                     if (currentSpeed == 0) {
                         if (motionObserved) {
@@ -508,13 +351,13 @@ namespace smartMotor {
                     if (stoppedSamples >= MOTION_STOP_SAMPLE_COUNT
                         && (motionObserved
                             || input.runningTime() - waitStartMs
-                                >= Math.abs(commandValueX10) * 100)) {
+                            >= Math.abs(commandValueX10) * 100)) {
                         return
                     }
                 } else if (stoppedSamples >= MOTION_STOP_SAMPLE_COUNT
                     && (targetReached
                         || stableAngleSamples
-                            >= MOTION_STABLE_ANGLE_SAMPLE_COUNT)) {
+                        >= MOTION_STABLE_ANGLE_SAMPLE_COUNT)) {
                     return
                 }
             }
@@ -522,26 +365,39 @@ namespace smartMotor {
         }
     }
 
-    /** 使机器人转向任务失效，并按需停止其正在驱动的左右轮。 */
+    /** 取消机器人转向，并按需停止其正在驱动的左右轮。 */
     function cancelRobotMotion(stopActiveMotors: boolean = true): void {
-        robotMotionGeneration++
+        robotMotionId++
         let shouldStop = robotTurnActive && stopActiveMotors
         robotTurnActive = false
         if (shouldStop) {
-            sendMaskCommand(COMMAND_STOP, robotMotorMask())
+            i2cCommandSend(COMMAND_STOP, [robotMotorMask() & 0x0F])
         }
     }
 
-    /** 返回当前左右轮对应的电机通道掩码。 */
+    /** 返回当前左右轮对应的电机端口掩码。 */
     function robotMotorMask(): number {
         return (1 << (robotLeftMotor - 1)) | (1 << (robotRightMotor - 1))
     }
 
-    /** 按机器人逻辑方向一次性设置左右轮速度。 */
-    function sendRobotSpeed(leftSpeed: number, rightSpeed: number): boolean {
-        let leftPwm = -Math.round(clamp(leftSpeed, -100, 100) * 10)
-        let rightPwm = Math.round(clamp(rightSpeed, -100, 100) * 10)
-        return sendSpeedBatch([robotLeftMotor, robotRightMotor], [leftPwm, rightPwm])
+    /** 按固定双电机数据一次性设置机器人左右轮速度。 */
+    function sendRobotSpeed(leftSpeed: number, rightSpeed: number): void {
+        let leftMotorSpeed = -Math.round(clamp(leftSpeed, -100, 100))
+        let rightMotorSpeed = Math.round(clamp(rightSpeed, -100, 100))
+        let direction = 0
+        if (leftMotorSpeed < 0) {
+            direction |= 0x01
+        }
+        if (rightMotorSpeed < 0) {
+            direction |= 0x02
+        }
+        i2cCommandSend(COMMAND_ROBOT_SET_SPEED, [
+            robotLeftMotor,
+            robotRightMotor,
+            Math.abs(leftMotorSpeed),
+            Math.abs(rightMotorSpeed),
+            direction
+        ])
     }
 
     /** 在物理归零后等待一份新的接近零度的相对角度样本。 */
@@ -549,12 +405,12 @@ namespace smartMotor {
         let startMs = input.runningTime()
         basic.pause(MOTION_START_DELAY_MS)
         while (input.runningTime() - startMs < RESET_WAIT_TIMEOUT_MS) {
-            let telemetry = readMotorTelemetry(motor)
-            if (telemetry.length == MOTOR_TELEMETRY_RECORD_LENGTH
-                && (telemetry[0] & MOTOR_TELEMETRY_ANGLE_VALID) != 0
-                && telemetry[MOTOR_TELEMETRY_ANGLE_SEQUENCE_OFFSET] != previousSequence
-                && Math.abs(readI32Le(telemetry, MOTOR_TELEMETRY_RELATIVE_ANGLE_OFFSET))
-                    <= MOTION_TARGET_TOLERANCE_X10) {
+            let motorData = refreshMotorData(motor, MOTOR_DATA_REFRESH_ANGLE)
+            if (motorData.length == MOTOR_DATA_RECORD_LENGTH
+                && (motorData[0] & MOTOR_DATA_ANGLE_VALID) != 0
+                && motorData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET] != previousSequence
+                && Math.abs(readI32Le(motorData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET))
+                <= MOTION_TARGET_TOLERANCE_X10) {
                 return
             }
             basic.pause(MOTION_POLL_INTERVAL_MS)
@@ -562,8 +418,8 @@ namespace smartMotor {
     }
 
     /** 使用板载Z轴累计角度执行无PID的机器人相对转向。 */
-    function runRobotTurn(angle: number, speed: number, generation: number): void {
-        if (generation != robotMotionGeneration) {
+    function runRobotTurn(angle: number, speed: number, motionId: number): void {
+        if (motionId != robotMotionId) {
             return
         }
         let startYaw = readGyroAngle(SensorAxis.Z)
@@ -571,38 +427,33 @@ namespace smartMotor {
         let turnSpeed = clamp(Math.abs(speed), 1, 100)
         let positiveDirection = angle > 0
         robotTurnActive = true
-        if (!sendRobotSpeed(positiveDirection ? turnSpeed : -turnSpeed,
-            positiveDirection ? -turnSpeed : turnSpeed)) {
-            if (generation == robotMotionGeneration) {
-                robotTurnActive = false
-            }
-            return
-        }
-        if (generation != robotMotionGeneration) {
+        sendRobotSpeed(positiveDirection ? turnSpeed : -turnSpeed,
+            positiveDirection ? -turnSpeed : turnSpeed)
+        if (motionId != robotMotionId) {
             return
         }
         let startMs = input.runningTime()
         let timeoutMs = clamp(Math.round(Math.abs(angle) * 1000 / turnSpeed + 2000),
             MOTION_MIN_TIMEOUT_MS, MOTION_MAX_TIMEOUT_MS)
         while (input.runningTime() - startMs < timeoutMs) {
-            if (generation != robotMotionGeneration) {
+            if (motionId != robotMotionId) {
                 return
             }
             let error = targetYaw - readGyroAngle(SensorAxis.Z)
             if (Math.abs(error) <= ROBOT_TURN_TOLERANCE_DEGREES
                 || (positiveDirection && error < 0)
                 || (!positiveDirection && error > 0)) {
-                sendMaskCommand(COMMAND_STOP, robotMotorMask())
-                if (generation == robotMotionGeneration) {
+                i2cCommandSend(COMMAND_STOP, [robotMotorMask() & 0x0F])
+                if (motionId == robotMotionId) {
                     robotTurnActive = false
                 }
                 return
             }
             basic.pause(MOTION_POLL_INTERVAL_MS)
         }
-        if (generation == robotMotionGeneration) {
-            sendMaskCommand(COMMAND_STOP, robotMotorMask())
-            if (generation == robotMotionGeneration) {
+        if (motionId == robotMotionId) {
+            i2cCommandSend(COMMAND_STOP, [robotMotorMask() & 0x0F])
+            if (motionId == robotMotionId) {
                 robotTurnActive = false
             }
         }
@@ -614,12 +465,10 @@ namespace smartMotor {
     //% weight=100
     /** 按指定方向和速度启动单路电机。 */
     export function motorStart(motor: MotorPort, speed: number, direction: TurnDirection): void {
-        if (!validMotor(motor)) {
-            return
-        }
         cancelRobotMotion()
-        let pwm = Math.round(clamp(speed, 0, 100) * 10)
-        sendSpeedBatch([motor], [direction == TurnDirection.CCW ? -pwm : pwm])
+        let speedPercent = Math.round(clamp(speed, 0, 100))
+        i2cCommandSend(COMMAND_SET_SPEED,
+            [motor, speedPercent, direction == TurnDirection.CCW ? 1 : 0])
     }
 
     //% group="Motor"
@@ -627,10 +476,8 @@ namespace smartMotor {
     //% weight=99
     /** 最高优先级停止指定电机并取消其待执行运动。 */
     export function motorStop(motor: MotorPort): void {
-        if (validMotor(motor)) {
-            cancelRobotMotion()
-            sendMaskCommand(COMMAND_STOP, 1 << (motor - 1))
-        }
+        cancelRobotMotion()
+        i2cCommandSend(COMMAND_STOP, [(1 << (motor - 1)) & 0x0F])
     }
 
     //% group="Motor"
@@ -638,19 +485,16 @@ namespace smartMotor {
     //% weight=98
     /** 将电机内部物理位置归零，并可等待新角度样本确认完成。 */
     export function motorReset(motor: MotorPort, waitMode: WaitMode = WaitMode.NoWait): void {
-        if (!validMotor(motor)) {
-            return
-        }
         cancelRobotMotion()
         let previousSequence = 0
         if (waitMode == WaitMode.Wait) {
-            let telemetry = readMotorTelemetry(motor)
-            if (telemetry.length == MOTOR_TELEMETRY_RECORD_LENGTH) {
-                previousSequence = telemetry[MOTOR_TELEMETRY_ANGLE_SEQUENCE_OFFSET]
+            let motorData = refreshMotorData(motor, MOTOR_DATA_REFRESH_ANGLE)
+            if (motorData.length == MOTOR_DATA_RECORD_LENGTH) {
+                previousSequence = motorData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET]
             }
         }
-        if (sendMaskCommand(COMMAND_RESET_PHYSICAL, 1 << (motor - 1))
-            && waitMode == WaitMode.Wait) {
+        i2cCommandSend(COMMAND_RESET_PHYSICAL, [(1 << (motor - 1)) & 0x0F])
+        if (waitMode == WaitMode.Wait) {
             waitForMotorReset(motor, previousSequence)
         }
     }
@@ -662,23 +506,31 @@ namespace smartMotor {
     //% weight=97
     /** 按秒、角度或圈数控制单路电机相对运动。 */
     export function motorMoveRelative(motor: MotorPort, value: number, mode: TurnMode, speed: number, direction: TurnDirection, waitMode: WaitMode = WaitMode.NoWait): void {
-        if (!validMotor(motor) || speed <= 0 || value <= 0) {
+        if (speed <= 0 || value <= 0) {
             return
         }
         cancelRobotMotion()
-        let speedValue = Math.round(clamp(speed, 1, 100) * 9)
-        let signedValue = movementValueX10(value, mode)
-        if (direction == TurnDirection.CCW) {
-            signedValue = -signedValue
-        }
-        let startTelemetry = pins.createBuffer(0)
+        let speedPercent = Math.round(clamp(speed, 1, 100))
+        let valueX10 = Math.round(value * (mode == TurnMode.Circle ? 3600 : 10))
+        let startData = pins.createBuffer(0)
         if (waitMode == WaitMode.Wait) {
-            startTelemetry = readMotorTelemetry(motor)
+            startData = refreshMotorData(motor,
+                MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
         }
-        if (sendMoveBatch([motor], [mode], [signedValue], [speedValue])
-            && waitMode == WaitMode.Wait) {
-            waitForMotorFeedback(motor, startTelemetry, mode, signedValue,
-                speedValue, -1, TurnDirectionEx.ShortestPath)
+        i2cCommandSend(COMMAND_MOVE, [
+            motor,
+            mode,
+            (valueX10 >> 24) & 0xFF,
+            (valueX10 >> 16) & 0xFF,
+            (valueX10 >> 8) & 0xFF,
+            valueX10 & 0xFF,
+            speedPercent,
+            direction == TurnDirection.CCW ? 1 : 0
+        ])
+        if (waitMode == WaitMode.Wait) {
+            waitForMotorFeedback(motor, startData, mode,
+                direction == TurnDirection.CCW ? -valueX10 : valueX10,
+                speedPercent * 9, -1, TurnDirectionEx.ShortestPath)
         }
     }
 
@@ -689,61 +541,69 @@ namespace smartMotor {
     //% weight=96
     /** 按指定路径和速度转到单圈绝对角度。 */
     export function motorMoveAbsolute(motor: MotorPort, angle: number, speed: number, direction: TurnDirectionEx, waitMode: WaitMode = WaitMode.NoWait): void {
-        if (!validMotor(motor) || speed <= 0) {
+        if (speed <= 0) {
             return
         }
         cancelRobotMotion()
         let normalized = normalizeAngleX10(Math.round(angle * 10))
-        let speedValue = Math.round(clamp(speed, 1, 100) * 9)
-        let startTelemetry = pins.createBuffer(0)
+        let speedPercent = Math.round(clamp(speed, 1, 100))
+        let startData = pins.createBuffer(0)
         if (waitMode == WaitMode.Wait) {
-            startTelemetry = readMotorTelemetry(motor)
+            startData = refreshMotorData(motor,
+                MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
         }
-        if (sendAbsoluteBatch([motor], [direction], [normalized], [speedValue])
-            && waitMode == WaitMode.Wait) {
-            waitForMotorFeedback(motor, startTelemetry, TurnMode.Degree, 0,
-                speedValue, normalized, direction)
+        i2cCommandSend(COMMAND_MOVE_ABSOLUTE, [
+            motor,
+            (normalized >> 8) & 0xFF,
+            normalized & 0xFF,
+            speedPercent,
+            direction == TurnDirectionEx.CW ? 0
+                : direction == TurnDirectionEx.CCW ? 1 : 2
+        ])
+        if (waitMode == WaitMode.Wait) {
+            waitForMotorFeedback(motor, startData, TurnMode.Degree, 0,
+                speedPercent * 9, normalized, direction)
         }
     }
 
     //% group="Motor"
     //% block="%motor speed (degrees/s)"
     //% weight=95
-    /** 读取单路电机最近一次有效速度。 */
+    /** 主动刷新并读取单路电机速度。 */
     export function motorGetSpeed(motor: MotorPort): number {
-        let telemetry = readMotorTelemetry(motor)
-        if (telemetry.length != MOTOR_TELEMETRY_RECORD_LENGTH
-            || (telemetry[0] & MOTOR_TELEMETRY_SPEED_VALID) == 0) {
+        let motorData = refreshMotorData(motor, MOTOR_DATA_REFRESH_SPEED)
+        if (motorData.length != MOTOR_DATA_RECORD_LENGTH
+            || (motorData[0] & MOTOR_DATA_SPEED_VALID) == 0) {
             return 0
         }
-        return readI16Le(telemetry, MOTOR_TELEMETRY_SPEED_OFFSET)
+        return readI16Le(motorData, MOTOR_DATA_SPEED_OFFSET)
     }
 
     //% group="Motor"
     //% block="%motor relative angle (degrees)"
     //% weight=94
-    /** 读取相对物理归零点或下位机相对零点的累计角度。 */
+    /** 主动刷新并读取相对物理归零点或下位机相对零点的累计角度。 */
     export function motorGetRelativeAngle(motor: MotorPort): number {
-        let telemetry = readMotorTelemetry(motor)
-        if (telemetry.length != MOTOR_TELEMETRY_RECORD_LENGTH
-            || (telemetry[0] & MOTOR_TELEMETRY_ANGLE_VALID) == 0) {
+        let motorData = refreshMotorData(motor, MOTOR_DATA_REFRESH_ANGLE)
+        if (motorData.length != MOTOR_DATA_RECORD_LENGTH
+            || (motorData[0] & MOTOR_DATA_ANGLE_VALID) == 0) {
             return 0
         }
-        return readI32Le(telemetry, MOTOR_TELEMETRY_RELATIVE_ANGLE_OFFSET) / 10
+        return readI32Le(motorData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET) / 10
     }
 
     //% group="Motor"
     //% block="%motor absolute angle (degrees)"
     //% weight=93
-    /** 读取归一化到0～359.9度的单圈绝对角度。 */
+    /** 主动刷新并读取归一化到0～359.9度的单圈绝对角度。 */
     export function motorGetAbsoluteAngle(motor: MotorPort): number {
-        let telemetry = readMotorTelemetry(motor)
-        if (telemetry.length != MOTOR_TELEMETRY_RECORD_LENGTH
-            || (telemetry[0] & MOTOR_TELEMETRY_ANGLE_VALID) == 0) {
+        let motorData = refreshMotorData(motor, MOTOR_DATA_REFRESH_ANGLE)
+        if (motorData.length != MOTOR_DATA_RECORD_LENGTH
+            || (motorData[0] & MOTOR_DATA_ANGLE_VALID) == 0) {
             return 0
         }
         return normalizeAngleX10(
-            readI32Le(telemetry, MOTOR_TELEMETRY_ABSOLUTE_ANGLE_OFFSET)) / 10
+            readI32Le(motorData, MOTOR_DATA_ABSOLUTE_ANGLE_OFFSET)) / 10
     }
 
     //% group="Robot"
@@ -773,7 +633,7 @@ namespace smartMotor {
     //% block="set left speed %leftSpeed\\% and right speed %rightSpeed\\%"
     //% leftSpeed.min=-100 leftSpeed.max=100 rightSpeed.min=-100 rightSpeed.max=100
     //% weight=78
-    /** 一条I2C批量命令设置机器人左右轮独立速度。 */
+    /** 一条固定双电机I2C命令设置机器人左右轮独立速度。 */
     export function robotMove(leftSpeed: number, rightSpeed: number): void {
         cancelRobotMotion()
         sendRobotSpeed(leftSpeed, rightSpeed)
@@ -789,12 +649,12 @@ namespace smartMotor {
             return
         }
         cancelRobotMotion()
-        let generation = robotMotionGeneration
+        let motionId = robotMotionId
         if (waitMode == WaitMode.Wait) {
-            runRobotTurn(angle, speed, generation)
+            runRobotTurn(angle, speed, motionId)
         } else {
             control.inBackground(function () {
-                runRobotTurn(angle, speed, generation)
+                runRobotTurn(angle, speed, motionId)
             })
         }
     }
@@ -804,7 +664,7 @@ namespace smartMotor {
     //% speed.min=1 speed.max=100 speed.defl=50 value.min=0
     //% inlineInputMode=inline
     //% weight=76
-    /** 按时间、毫米或厘米发送一条左右轮批量直行命令。 */
+    /** 按时间、毫米或厘米发送一条固定双电机直行命令。 */
     export function robotDriveStraight(direction: DriveDirection, value: number, mode: DriveMode, speed: number, waitMode: WaitMode = WaitMode.NoWait): void {
         if (value <= 0 || speed <= 0 || robotWheelDiameterMm <= 0) {
             return
@@ -823,30 +683,54 @@ namespace smartMotor {
         }
         let leftValue = -movementX10
         let rightValue = movementX10
-        let speedValue = Math.round(clamp(speed, 1, 100) * 9)
+        let speedPercent = Math.round(clamp(speed, 1, 100))
         let leftStart = pins.createBuffer(0)
         let rightStart = pins.createBuffer(0)
         if (waitMode == WaitMode.Wait) {
-            leftStart = readMotorTelemetry(robotLeftMotor)
-            rightStart = readMotorTelemetry(robotRightMotor)
+            leftStart = refreshMotorData(robotLeftMotor,
+                MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
+            rightStart = refreshMotorData(robotRightMotor,
+                MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
         }
-        if (sendMoveBatch([robotLeftMotor, robotRightMotor], [turnMode, turnMode],
-            [leftValue, rightValue], [speedValue, speedValue])
-            && waitMode == WaitMode.Wait) {
+        let directionMask = 0
+        if (leftValue < 0) {
+            directionMask |= 0x01
+        }
+        if (rightValue < 0) {
+            directionMask |= 0x02
+        }
+        let leftValueX10 = Math.abs(leftValue)
+        let rightValueX10 = Math.abs(rightValue)
+        i2cCommandSend(COMMAND_ROBOT_MOVE, [
+            robotLeftMotor,
+            robotRightMotor,
+            turnMode,
+            (leftValueX10 >> 24) & 0xFF,
+            (leftValueX10 >> 16) & 0xFF,
+            (leftValueX10 >> 8) & 0xFF,
+            leftValueX10 & 0xFF,
+            (rightValueX10 >> 24) & 0xFF,
+            (rightValueX10 >> 16) & 0xFF,
+            (rightValueX10 >> 8) & 0xFF,
+            rightValueX10 & 0xFF,
+            speedPercent,
+            directionMask
+        ])
+        if (waitMode == WaitMode.Wait) {
             waitForMotorFeedback(robotLeftMotor, leftStart, turnMode, leftValue,
-                speedValue, -1, TurnDirectionEx.ShortestPath)
+                speedPercent * 9, -1, TurnDirectionEx.ShortestPath)
             waitForMotorFeedback(robotRightMotor, rightStart, turnMode, rightValue,
-                speedValue, -1, TurnDirectionEx.ShortestPath)
+                speedPercent * 9, -1, TurnDirectionEx.ShortestPath)
         }
     }
 
     //% group="Robot"
     //% block="stop robot"
     //% weight=75
-    /** 取消机器人后台转向并最高优先级停止左右轮。 */
+    /** 取消机器人转向并最高优先级停止左右轮。 */
     export function robotStop(): void {
         cancelRobotMotion(false)
-        sendMaskCommand(COMMAND_STOP, robotMotorMask())
+        i2cCommandSend(COMMAND_STOP, [robotMotorMask() & 0x0F])
     }
 
     //% group="Robot"
@@ -880,33 +764,24 @@ namespace smartMotor {
     //% weight=60
     /** 读取下位机固件版本。 */
     export function readVersion(): string {
-        let payload: number[] = []
-        let reply = transact(COMMAND_VERSION, payload, 3)
-        if (reply.length != 3) {
-            return "V 0.0.0"
-        }
-        return "V " + reply[0] + "." + reply[1] + "." + reply[2]
-    }
-
-    /** 返回最近一次控制命令是否被下位机即时接收，不显示为积木。 */
-    export function lastCommandAccepted(): boolean {
-        return lastAcceptStatusValue == REPLY_STATUS_ACCEPTED
+        i2cCommandSend(COMMAND_VERSION, [])
+        let reply = pins.i2cReadBuffer(I2C_ADDRESS, 3)
+        return reply.length == 3
+            ? "V " + reply[0] + "." + reply[1] + "." + reply[2]
+            : "V 0.0.0"
     }
 
     /** 读取指定电机当前锁存通信错误，不显示为积木。 */
     export function readMotorError(motor: MotorPort): MotorErrorCode {
         let data = readRegisters(REGISTER_MOTOR_ERROR_START + motor - 1, 1)
-        if (data.length != 1 || data[0] > MotorErrorCode.TransmitTimeout) {
-            return MotorErrorCode.Unknown
-        }
-        return data[0]
+        return data.length == 1 && data[0] <= MotorErrorCode.TransmitTimeout
+            ? data[0]
+            : MotorErrorCode.Unknown
     }
 
     /** 将当前累计角度保存为下位机相对零点，不显示为积木。 */
     export function resetRelativeAngle(motor: MotorPort): void {
-        if (validMotor(motor)) {
-            cancelRobotMotion()
-            sendMaskCommand(COMMAND_RESET_RELATIVE, 1 << (motor - 1))
-        }
+        cancelRobotMotion()
+        i2cCommandSend(COMMAND_RESET_RELATIVE, [(1 << (motor - 1)) & 0x0F])
     }
 }
