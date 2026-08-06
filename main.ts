@@ -1,7 +1,6 @@
 //% color=#ff0011 icon="\uf1b9" block="Smart Motor"
 namespace smartMotor {
     const I2C_ADDRESS = 0x66
-    const I2C_COMMAND_DELAY_MS = 1
     const I2C_REGISTER_PREPARE_DELAY_MS = 2
     const COMMAND_REGISTER_READ = 0x01
     const COMMAND_MOTOR_DATA_REFRESH = 0x02
@@ -31,11 +30,10 @@ namespace smartMotor {
     const MOTOR_DATA_REFRESH_TIMEOUT_MS = 1000
     const MOTOR_DATA_REFRESH_POLL_INTERVAL_MS = 5
     const MOTION_START_DELAY_MS = 100
+    const MOTOR_WAIT_POLL_INTERVAL_MS = 10
     const MOTION_POLL_INTERVAL_MS = 20
     const MOTION_TARGET_TOLERANCE_X10 = 10
     const MOTION_START_ANGLE_DELTA_X10 = 5
-    const MOTION_STABLE_ANGLE_DELTA_X10 = 1
-    const MOTION_STABLE_ANGLE_SAMPLE_COUNT = 10
     const MOTION_STOP_SAMPLE_COUNT = 2
     const MOTION_MIN_TIMEOUT_MS = 2000
     const MOTION_MAX_TIMEOUT_MS = 60000
@@ -161,7 +159,7 @@ namespace smartMotor {
     }
 
     /** 按Cutebot Pro协议发送一条I2C指令，并忙等待接收或查询数据准备。 */
-    function i2cCommandSend(command: number, data: number[], delay: number = I2C_COMMAND_DELAY_MS): void {
+    function i2cCommandSend(command: number, data: number[], delay: number = 1): void {
         let frame = pins.createBuffer(data.length + 4)
         frame[0] = 0xFF
         frame[1] = 0xF9
@@ -219,12 +217,6 @@ namespace smartMotor {
         return normalized < 0 ? normalized + 3600 : normalized
     }
 
-    /** 返回两个单圈角度之间的最小绝对差，单位为0.1度。 */
-    function absoluteAngleErrorX10(currentX10: number, targetX10: number): number {
-        let difference = Math.abs(normalizeAngleX10(currentX10) - normalizeAngleX10(targetX10))
-        return Math.min(difference, 3600 - difference)
-    }
-
     /** 按下位机相同的方向规则计算绝对角度命令预计经过的角度。 */
     function absoluteTravelX10(currentX10: number, targetX10: number, turnMode: TurnDirectionEx): number {
         let current = normalizeAngleX10(currentX10)
@@ -251,10 +243,7 @@ namespace smartMotor {
         return clamp(Math.round(estimatedMs * 2 + 2000), MOTION_MIN_TIMEOUT_MS, MOTION_MAX_TIMEOUT_MS)
     }
 
-    /**
-     * 启动后等待100ms并确认运动发生；所有模式都以连续新速度样本归零作为
-     * 完成条件，角度模式还要求到达目标或运动后角度稳定，由动态超时兜底。
-     */
+    /** 等待角度目标完成且连续两份新速度为零，避免下一条命令提前覆盖。 */
     function waitForMotorFeedback(motor: MotorPort, startData: Buffer, mode: TurnMode, commandValueX10: number, speedValue: number, absoluteTargetX10: number, turnMode: TurnDirectionEx): void {
         let startAngleValid = false
         let startAngleX10 = 0
@@ -272,32 +261,40 @@ namespace smartMotor {
             lastSpeedSequence = startData[MOTOR_DATA_SPEED_SEQUENCE_OFFSET]
         }
         let absoluteTarget = absoluteTargetX10 >= 0
-        let targetAngleValid = absoluteTarget || (startAngleValid && mode != TurnMode.Second)
-        let targetAngleX10 = absoluteTarget
-            ? normalizeAngleX10(absoluteTargetX10)
-            : startAngleX10 + commandValueX10
+        let absoluteTravelMode = turnMode
         let expectedValueX10 = Math.abs(commandValueX10)
         let timeoutMode = mode
         if (absoluteTarget) {
             timeoutMode = TurnMode.Degree
-            expectedValueX10 = startAngleValid
-                ? absoluteTravelX10(startAngleX10, targetAngleX10, turnMode)
-                : 3600
+            if (startAngleValid) {
+                let targetAngleX10 = normalizeAngleX10(absoluteTargetX10)
+                if (turnMode == TurnDirectionEx.ShortestPath) {
+                    absoluteTravelMode = absoluteTravelX10(startAngleX10,
+                        targetAngleX10, TurnDirectionEx.CW)
+                        <= absoluteTravelX10(startAngleX10,
+                            targetAngleX10, TurnDirectionEx.CCW)
+                        ? TurnDirectionEx.CW : TurnDirectionEx.CCW
+                }
+                expectedValueX10 = absoluteTravelX10(startAngleX10,
+                    targetAngleX10, absoluteTravelMode)
+            } else {
+                expectedValueX10 = 3600
+            }
         }
         let timeoutMs = motionTimeoutMs(expectedValueX10, timeoutMode, speedValue)
         let waitStartMs = input.runningTime()
         let referenceAngleValid = startAngleValid
         let referenceAngleX10 = startAngleX10
-        let previousAngleValid = false
-        let previousAngleX10 = 0
-        let motionObserved = false
-        let targetReached = false
-        let stableAngleSamples = 0
+        let targetReached = absoluteTarget && startAngleValid
+            && expectedValueX10 <= MOTION_TARGET_TOLERANCE_X10
+        let motionObserved = targetReached
         let stoppedSamples = 0
         basic.pause(MOTION_START_DELAY_MS)
         while (input.runningTime() - waitStartMs < timeoutMs) {
             let motorData = refreshMotorData(motor,
-                MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
+                motionObserved && (mode == TurnMode.Second || targetReached)
+                    ? MOTOR_DATA_REFRESH_SPEED
+                    : MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
             if (motorData.length == MOTOR_DATA_RECORD_LENGTH) {
                 let flags = motorData[0]
                 let angleSequence = motorData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET]
@@ -315,20 +312,22 @@ namespace smartMotor {
                         >= MOTION_START_ANGLE_DELTA_X10) {
                         motionObserved = true
                     }
-                    if (previousAngleValid
-                        && Math.abs(currentAngleX10 - previousAngleX10)
-                        <= MOTION_STABLE_ANGLE_DELTA_X10) {
-                        stableAngleSamples++
-                    } else {
-                        stableAngleSamples = 0
-                    }
-                    previousAngleValid = true
-                    previousAngleX10 = currentAngleX10
-                    if (targetAngleValid) {
-                        let targetErrorX10 = absoluteTarget
-                            ? absoluteAngleErrorX10(currentAngleX10, targetAngleX10)
-                            : Math.abs(currentAngleX10 - targetAngleX10)
-                        targetReached = targetErrorX10 <= MOTION_TARGET_TOLERANCE_X10
+                    if (!targetReached && startAngleValid
+                        && mode != TurnMode.Second) {
+                        if (absoluteTarget) {
+                            targetReached = absoluteTravelX10(startAngleX10,
+                                currentAngleX10, absoluteTravelMode)
+                                + MOTION_TARGET_TOLERANCE_X10
+                                >= expectedValueX10
+                        } else if (commandValueX10 >= 0) {
+                            targetReached = currentAngleX10
+                                + MOTION_TARGET_TOLERANCE_X10
+                                >= startAngleX10 + commandValueX10
+                        } else {
+                            targetReached = currentAngleX10
+                                - MOTION_TARGET_TOLERANCE_X10
+                                <= startAngleX10 + commandValueX10
+                        }
                     }
                 }
                 let speedSequence = motorData[MOTOR_DATA_SPEED_SEQUENCE_OFFSET]
@@ -337,7 +336,10 @@ namespace smartMotor {
                     let currentSpeed = readI16Le(motorData, MOTOR_DATA_SPEED_OFFSET)
                     lastSpeedSequence = speedSequence
                     if (currentSpeed == 0) {
-                        if (motionObserved) {
+                        if (motionObserved
+                            || (mode == TurnMode.Second
+                                && input.runningTime() - waitStartMs
+                                >= Math.abs(commandValueX10) * 100)) {
                             stoppedSamples++
                         } else {
                             stoppedSamples = 0
@@ -347,21 +349,12 @@ namespace smartMotor {
                         motionObserved = true
                     }
                 }
-                if (mode == TurnMode.Second) {
-                    if (stoppedSamples >= MOTION_STOP_SAMPLE_COUNT
-                        && (motionObserved
-                            || input.runningTime() - waitStartMs
-                            >= Math.abs(commandValueX10) * 100)) {
-                        return
-                    }
-                } else if (stoppedSamples >= MOTION_STOP_SAMPLE_COUNT
-                    && (targetReached
-                        || stableAngleSamples
-                        >= MOTION_STABLE_ANGLE_SAMPLE_COUNT)) {
+                if (stoppedSamples >= MOTION_STOP_SAMPLE_COUNT
+                    && (mode == TurnMode.Second || targetReached)) {
                     return
                 }
             }
-            basic.pause(MOTION_POLL_INTERVAL_MS)
+            basic.pause(MOTOR_WAIT_POLL_INTERVAL_MS)
         }
     }
 
@@ -484,7 +477,7 @@ namespace smartMotor {
     //% block="reset position of %motor %waitMode"
     //% weight=98
     /** 将电机内部物理位置归零，并可等待新角度样本确认完成。 */
-    export function motorReset(motor: MotorPort, waitMode: WaitMode = WaitMode.NoWait): void {
+    export function motorReset(motor: MotorPort, waitMode: WaitMode = 0): void {
         cancelRobotMotion()
         let previousSequence = 0
         if (waitMode == WaitMode.Wait) {
@@ -505,7 +498,7 @@ namespace smartMotor {
     //% inlineInputMode=inline
     //% weight=97
     /** 按秒、角度或圈数控制单路电机相对运动。 */
-    export function motorMoveRelative(motor: MotorPort, value: number, mode: TurnMode, speed: number, direction: TurnDirection, waitMode: WaitMode = WaitMode.NoWait): void {
+    export function motorMoveRelative(motor: MotorPort, value: number, mode: TurnMode, speed: number, direction: TurnDirection, waitMode: WaitMode = 0): void {
         if (speed <= 0 || value <= 0) {
             return
         }
@@ -540,7 +533,7 @@ namespace smartMotor {
     //% inlineInputMode=inline
     //% weight=96
     /** 按指定路径和速度转到单圈绝对角度。 */
-    export function motorMoveAbsolute(motor: MotorPort, angle: number, speed: number, direction: TurnDirectionEx, waitMode: WaitMode = WaitMode.NoWait): void {
+    export function motorMoveAbsolute(motor: MotorPort, angle: number, speed: number, direction: TurnDirectionEx, waitMode: WaitMode = 0): void {
         if (speed <= 0) {
             return
         }
@@ -644,7 +637,7 @@ namespace smartMotor {
     //% speed.min=1 speed.max=100 speed.defl=50
     //% weight=77
     /** 使用板载Z轴角度控制机器人相对转向，不引入PID调节。 */
-    export function robotTurnTo(angle: number, speed: number, waitMode: WaitMode = WaitMode.NoWait): void {
+    export function robotTurnTo(angle: number, speed: number, waitMode: WaitMode = 0): void {
         if (angle == 0 || speed <= 0) {
             return
         }
@@ -665,7 +658,7 @@ namespace smartMotor {
     //% inlineInputMode=inline
     //% weight=76
     /** 按时间、毫米或厘米发送一条固定双电机直行命令。 */
-    export function robotDriveStraight(direction: DriveDirection, value: number, mode: DriveMode, speed: number, waitMode: WaitMode = WaitMode.NoWait): void {
+    export function robotDriveStraight(direction: DriveDirection, value: number, mode: DriveMode, speed: number, waitMode: WaitMode = 0): void {
         if (value <= 0 || speed <= 0 || robotWheelDiameterMm <= 0) {
             return
         }
