@@ -2,6 +2,7 @@
 namespace smartMotor {
     const I2C_ADDRESS = 0x66
     const I2C_REGISTER_PREPARE_DELAY_MS = 2
+    const MOTOR_DATA_REFRESH_DELAY_MS = 10
     const COMMAND_REGISTER_READ = 0x01
     const COMMAND_MOTOR_DATA_REFRESH = 0x02
     const COMMAND_VERSION = 0x10
@@ -16,7 +17,6 @@ namespace smartMotor {
     const REGISTER_GYRO_ANGLE_START = 0x03
     const REGISTER_ACCELERATION_START = 0x0F
     const REGISTER_MOTOR_ERROR_START = 0x15
-    const REGISTER_MOTOR_DATA_START = 0x19
     const MOTOR_DATA_RECORD_LENGTH = 13
     const MOTOR_DATA_ANGLE_VALID = 0x01
     const MOTOR_DATA_SPEED_VALID = 0x02
@@ -27,8 +27,6 @@ namespace smartMotor {
     const MOTOR_DATA_SPEED_SEQUENCE_OFFSET = 12
     const MOTOR_DATA_REFRESH_ANGLE = 0x01
     const MOTOR_DATA_REFRESH_SPEED = 0x02
-    const MOTOR_DATA_REFRESH_TIMEOUT_MS = 1000
-    const MOTOR_DATA_REFRESH_POLL_INTERVAL_MS = 5
     const MOTION_START_DELAY_MS = 100
     const MOTOR_WAIT_POLL_INTERVAL_MS = 10
     const MOTION_POLL_INTERVAL_MS = 20
@@ -175,40 +173,23 @@ namespace smartMotor {
     /** 通知下位机按需刷新请求范围，等待2ms后直接读取原始寄存器。 */
     function readRegisters(startAddress: number, length: number): Buffer {
         let requestLength = clamp(Math.round(length), 1, 24)
-        i2cCommandSend(COMMAND_REGISTER_READ, [startAddress, requestLength],
-            I2C_REGISTER_PREPARE_DELAY_MS)
+        i2cCommandSend(COMMAND_REGISTER_READ, [startAddress, requestLength], I2C_REGISTER_PREPARE_DELAY_MS)
         return pins.i2cReadBuffer(I2C_ADDRESS, requestLength)
     }
 
-    /** 读取单路电机的有效标志、相对/绝对角度、速度和更新序列。 */
-    function readMotorData(motor: MotorPort): Buffer {
-        let startAddress = REGISTER_MOTOR_DATA_START
-            + (motor - MotorPort.M1) * MOTOR_DATA_RECORD_LENGTH
-        return readRegisters(startAddress, MOTOR_DATA_RECORD_LENGTH)
-    }
-
-    /** 请求下位机刷新单路电机数据，并等待对应更新序列变化。 */
+    /** 请求下位机刷新单路电机数据，等待UART回复后直接读取最新记录。 */
     function refreshMotorData(motor: MotorPort, dataMask: number): Buffer {
-        let oldData = readMotorData(motor)
-        let oldAngleSequence = oldData.length == MOTOR_DATA_RECORD_LENGTH
-            ? oldData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET] : -1
-        let oldSpeedSequence = oldData.length == MOTOR_DATA_RECORD_LENGTH
-            ? oldData[MOTOR_DATA_SPEED_SEQUENCE_OFFSET] : -1
-        i2cCommandSend(COMMAND_MOTOR_DATA_REFRESH,
-            [(1 << (motor - 1)) & 0x0F, dataMask])
-        let startMs = input.runningTime()
-        while (input.runningTime() - startMs < MOTOR_DATA_REFRESH_TIMEOUT_MS) {
-            let motorData = readMotorData(motor)
-            if (motorData.length == MOTOR_DATA_RECORD_LENGTH
-                && ((dataMask & MOTOR_DATA_REFRESH_ANGLE) == 0
-                    || motorData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET] != oldAngleSequence)
-                && ((dataMask & MOTOR_DATA_REFRESH_SPEED) == 0
-                    || motorData[MOTOR_DATA_SPEED_SEQUENCE_OFFSET] != oldSpeedSequence)) {
-                return motorData
-            }
-            basic.pause(MOTOR_DATA_REFRESH_POLL_INTERVAL_MS)
+        i2cCommandSend(COMMAND_MOTOR_DATA_REFRESH, [motor, dataMask], MOTOR_DATA_REFRESH_DELAY_MS)
+        let motorData = pins.i2cReadBuffer(I2C_ADDRESS, MOTOR_DATA_RECORD_LENGTH)
+        if ((motorData[0] & dataMask) != dataMask) {
+            delayMs(5)
+            motorData = pins.i2cReadBuffer(I2C_ADDRESS, MOTOR_DATA_RECORD_LENGTH)
         }
-        return pins.createBuffer(0)
+        if ((motorData[0] & dataMask) != dataMask) {
+            delayMs(5)
+            motorData = pins.i2cReadBuffer(I2C_ADDRESS, MOTOR_DATA_RECORD_LENGTH)
+        }
+        return motorData
     }
 
     /** 将任意0.1度角度归一化到0～3599。 */
@@ -291,10 +272,7 @@ namespace smartMotor {
         let stoppedSamples = 0
         basic.pause(MOTION_START_DELAY_MS)
         while (input.runningTime() - waitStartMs < timeoutMs) {
-            let motorData = refreshMotorData(motor,
-                motionObserved && (mode == TurnMode.Second || targetReached)
-                    ? MOTOR_DATA_REFRESH_SPEED
-                    : MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
+            let motorData = refreshMotorData(motor, motionObserved && (mode == TurnMode.Second || targetReached) ? MOTOR_DATA_REFRESH_SPEED : MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
             if (motorData.length == MOTOR_DATA_RECORD_LENGTH) {
                 let flags = motorData[0]
                 let angleSequence = motorData[MOTOR_DATA_ANGLE_SEQUENCE_OFFSET]
@@ -349,8 +327,7 @@ namespace smartMotor {
                         motionObserved = true
                     }
                 }
-                if (stoppedSamples >= MOTION_STOP_SAMPLE_COUNT
-                    && (mode == TurnMode.Second || targetReached)) {
+                if (stoppedSamples >= MOTION_STOP_SAMPLE_COUNT&& (mode == TurnMode.Second || targetReached || !startAngleValid)) {
                     return
                 }
             }
