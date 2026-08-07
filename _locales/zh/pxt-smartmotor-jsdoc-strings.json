@@ -25,5 +25,6 @@
     "smartMotor.robotGetYaw": "读取机器人转向使用的板载Z轴累计偏航角。",
     "smartMotor.readGyroAngle": "读取板载陀螺仪指定轴的累计角度，单位为度。",
     "smartMotor.readAcceleration": "读取板载加速度计指定轴的加速度，单位为mg。",
+    "smartMotor.resetGyroAngle": "清零板载陀螺仪X、Y、Z三轴累计角度",
     "smartMotor.readVersion": "读取下位机固件版本。"
 }

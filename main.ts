@@ -1,11 +1,12 @@
 //% color=#ff0011 icon="\uf1b9" block="Smart Motor"
 namespace smartMotor {
     const I2C_ADDRESS = 0x66
-    const I2C_REGISTER_PREPARE_DELAY_MS = 2
+    const I2C_REGISTER_PREPARE_DELAY_MS = 5
     const MOTOR_DATA_REFRESH_DELAY_MS = 10
     const COMMAND_REGISTER_READ = 0x01
     const COMMAND_MOTOR_DATA_REFRESH = 0x02
     const COMMAND_VERSION = 0x10
+    const COMMAND_GYRO_RESET = 0x11
     const COMMAND_SET_SPEED = 0x20
     const COMMAND_STOP = 0x21
     const COMMAND_MOVE = 0x22
@@ -170,7 +171,7 @@ namespace smartMotor {
         delayMs(delay)
     }
 
-    /** 通知下位机按需刷新请求范围，等待2ms后直接读取原始寄存器。 */
+    /** 通知下位机按需刷新请求范围，等待5ms后直接读取原始寄存器。 */
     function readRegisters(startAddress: number, length: number): Buffer {
         let requestLength = clamp(Math.round(length), 1, 24)
         i2cCommandSend(COMMAND_REGISTER_READ, [startAddress, requestLength], I2C_REGISTER_PREPARE_DELAY_MS)
@@ -721,12 +722,20 @@ namespace smartMotor {
     }
 
     //% group="Sensor"
-    //% block="acceleration %axis (mg)"
+    //% block="gyroscope %axis acceleration (mg)"
     //% weight=69
     /** 读取板载加速度计指定轴的加速度，单位为mg。 */
     export function readAcceleration(axis: SensorAxis): number {
         let data = readRegisters(REGISTER_ACCELERATION_START + axis * 2, 2)
         return data.length == 2 ? readI16Le(data, 0) : 0
+    }
+
+    //% group="Sensor"
+    //% block="reset gyroscope accumulated angles"
+    //% weight=68
+    /** 清零板载陀螺仪X、Y、Z三轴累计角度，不清除动态校准数据。 */
+    export function resetGyroAngle(): void {
+        i2cCommandSend(COMMAND_GYRO_RESET, [], I2C_REGISTER_PREPARE_DELAY_MS)
     }
 
     //% group="Information"

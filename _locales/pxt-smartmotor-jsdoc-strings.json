@@ -25,5 +25,6 @@
     "smartMotor.robotGetYaw": "Read the onboard Z-axis accumulated yaw angle used by robot turning.",
     "smartMotor.readGyroAngle": "Read one onboard gyroscope accumulated angle in degrees.",
     "smartMotor.readAcceleration": "Read one onboard accelerometer axis in milligravity.",
+    "smartMotor.resetGyroAngle": "Reset the onboard X, Y, and Z accumulated gyroscope angles without clearing calibration data.",
     "smartMotor.readVersion": "Read the controller firmware version."
 }
