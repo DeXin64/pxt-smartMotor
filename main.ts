@@ -219,7 +219,7 @@ namespace smartMotor {
 
     /** 发送数据查询并轮询有效标志，超时返回该查询最近一次有效数据。 */
     function i2cQueryRead(command: number, commandData: number[], dataLength: number,
-        timeoutMs: number = I2C_QUERY_TIMEOUT_MS): Buffer {
+        timeoutMs: number = 100): Buffer {
         let key = queryCacheKey(command, commandData, dataLength)
         let cachedData = readQueryCache(key, dataLength)
         lastQueryWasSuccessful = false
@@ -247,7 +247,7 @@ namespace smartMotor {
 
     /** 通知下位机按需刷新请求范围并轮询读取有效寄存器数据。 */
     function readRegisters(startAddress: number, length: number,
-        timeoutMs: number = I2C_QUERY_TIMEOUT_MS): Buffer {
+        timeoutMs: number = 100): Buffer {
         let requestLength = clamp(Math.round(length), 1, 24)
         return i2cQueryRead(COMMAND_REGISTER_READ, [startAddress, requestLength], requestLength,
             timeoutMs)
