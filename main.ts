@@ -41,6 +41,9 @@ namespace smartMotor {
     const MOTION_MAX_TIMEOUT_MS = 60000
     const RESET_WAIT_TIMEOUT_MS = 5000
     const ROBOT_TURN_TOLERANCE_DEGREES = 1
+    const ROBOT_DRIVE_GYRO_KP = 2
+    const ROBOT_DRIVE_GYRO_MAX_CORRECTION = 35
+    const ROBOT_DRIVE_TARGET_TOLERANCE_X10 = 15
     const ROBOT_DEFAULT_WHEEL_DIAMETER_MM = 62
 
     /** 电机接口位置。 */
@@ -101,6 +104,16 @@ namespace smartMotor {
         Centimeter = 2
     }
 
+    /** Robot acceleration level used by Elecfreaks-compatible robot blocks. */
+    export enum AccelLevel {
+        //% block="low"
+        Low = 0,
+        //% block="medium"
+        Medium = 1,
+        //% block="high"
+        High = 2
+    }
+
     /** 是否在积木返回前等待电机反馈表明运动已经完成。 */
     export enum WaitMode {
         //% block="do not wait"
@@ -133,6 +146,7 @@ namespace smartMotor {
     let robotWheelDiameterMm = ROBOT_DEFAULT_WHEEL_DIAMETER_MM
     let robotMotionId = 0
     let robotTurnActive = false
+    let robotDriveActive = false
     let lastQueryWasSuccessful = false
     let queryCacheKeys: string[] = []
     let queryCacheData: Buffer[] = []
@@ -154,6 +168,11 @@ namespace smartMotor {
     /** 将速度百分比限制到指定范围并换算为整数。 */
     function clamp(value: number, minimum: number, maximum: number): number {
         return value < minimum ? minimum : value > maximum ? maximum : value
+    }
+
+    function normalizeAccelLevel(accel: AccelLevel): AccelLevel {
+        return accel == AccelLevel.Low || accel == AccelLevel.High
+            ? accel : AccelLevel.Medium
     }
 
     function copyBuffer(source: Buffer): Buffer {
@@ -404,8 +423,9 @@ namespace smartMotor {
     /** 取消机器人转向，并按需停止其正在驱动的左右轮。 */
     function cancelRobotMotion(stopActiveMotors: boolean = true): void {
         robotMotionId++
-        let shouldStop = robotTurnActive && stopActiveMotors
+        let shouldStop = (robotTurnActive || robotDriveActive) && stopActiveMotors
         robotTurnActive = false
+        robotDriveActive = false
         if (shouldStop) {
             i2cCommandSend(COMMAND_STOP, [robotMotorMask() & 0x0F])
         }
@@ -492,6 +512,66 @@ namespace smartMotor {
             if (motionId == robotMotionId) {
                 robotTurnActive = false
             }
+        }
+    }
+
+    /** 判断电机相对角度是否已经达到本次直行需要的行程。 */
+    function motorTravelReached(startData: Buffer, currentData: Buffer, targetX10: number): boolean {
+        if (startData.length != MOTOR_DATA_RECORD_LENGTH
+            || currentData.length != MOTOR_DATA_RECORD_LENGTH
+            || (startData[0] & MOTOR_DATA_ANGLE_VALID) == 0
+            || (currentData[0] & MOTOR_DATA_ANGLE_VALID) == 0) {
+            return false
+        }
+        let startAngleX10 = readI32Le(startData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
+        let currentAngleX10 = readI32Le(currentData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
+        return Math.abs(currentAngleX10 - startAngleX10)
+            + ROBOT_DRIVE_TARGET_TOLERANCE_X10 >= targetX10
+    }
+
+    /** 使用板载Z轴累计角度对直行进行PXT侧航向修正。 */
+    function runRobotDriveStraightWithGyro(direction: DriveDirection, movementX10: number, mode: TurnMode, speed: number, motionId: number): void {
+        if (motionId != robotMotionId) {
+            return
+        }
+        let speedPercent = Math.round(clamp(speed, 1, 100))
+        let baseSpeed = direction == DriveDirection.Backward ? -speedPercent : speedPercent
+        let targetTravelX10 = Math.abs(movementX10)
+        let timedDrive = mode == TurnMode.Second
+        let leftStart = pins.createBuffer(0)
+        let rightStart = pins.createBuffer(0)
+        if (!timedDrive) {
+            leftStart = refreshMotorData(robotLeftMotor, MOTOR_DATA_REFRESH_ANGLE)
+            rightStart = refreshMotorData(robotRightMotor, MOTOR_DATA_REFRESH_ANGLE)
+        }
+        let targetYaw = readGyroAngle(SensorAxis.Z)
+        let timeoutMs = timedDrive
+            ? Math.round(targetTravelX10 * 100)
+            : motionTimeoutMs(targetTravelX10, TurnMode.Degree, speedPercent * 9)
+        let maxCorrection = clamp(speedPercent - 1, 0, ROBOT_DRIVE_GYRO_MAX_CORRECTION)
+        robotDriveActive = true
+        let startMs = input.runningTime()
+        while (input.runningTime() - startMs < timeoutMs) {
+            if (motionId != robotMotionId) {
+                return
+            }
+            let yawError = targetYaw - readGyroAngle(SensorAxis.Z)
+            let correction = clamp(Math.round(yawError * ROBOT_DRIVE_GYRO_KP),
+                -maxCorrection, maxCorrection)
+            sendRobotSpeed(baseSpeed + correction, baseSpeed - correction)
+            if (!timedDrive) {
+                let leftData = refreshMotorData(robotLeftMotor, MOTOR_DATA_REFRESH_ANGLE)
+                let rightData = refreshMotorData(robotRightMotor, MOTOR_DATA_REFRESH_ANGLE)
+                if (motorTravelReached(leftStart, leftData, targetTravelX10)
+                    && motorTravelReached(rightStart, rightData, targetTravelX10)) {
+                    break
+                }
+            }
+            basic.pause(MOTION_POLL_INTERVAL_MS)
+        }
+        if (motionId == robotMotionId) {
+            i2cCommandSend(COMMAND_STOP, [robotMotorMask() & 0x0F])
+            robotDriveActive = false
         }
     }
 
@@ -676,9 +756,24 @@ namespace smartMotor {
     }
 
     //% group="Robot"
-    //% block="turn robot %angle degrees at %speed\\% %waitMode"
+    //% block="turn robot %angle degrees at %speed\\% accel %accel %waitMode"
+    //% angle.defl=90
     //% speed.min=1 speed.max=100 speed.defl=50
+    //% accel.defl=smartMotor.AccelLevel.Medium
+    //% waitMode.defl=smartMotor.WaitMode.Wait
     //% weight=77
+    /** Elecfreaks-compatible robot turn block. V1 firmware keeps using PXT-side yaw feedback; acceleration is reserved for protocol-compatible callers. */
+    export function robotTurnToWithAccel(angle: number, speed: number, accel: AccelLevel = AccelLevel.Medium, waitMode: WaitMode = 0): void {
+        normalizeAccelLevel(accel)
+        robotTurnTo(angle, speed, waitMode)
+    }
+
+    //% group="Robot"
+    //% block="turn robot %angle degrees at %speed\\% %waitMode"
+    //% angle.defl=90
+    //% speed.min=1 speed.max=100 speed.defl=50
+    //% waitMode.defl=smartMotor.WaitMode.Wait
+    //% weight=76
     /** 使用板载Z轴角度控制机器人相对转向，不引入PID调节。 */
     export function robotTurnTo(angle: number, speed: number, waitMode: WaitMode = 0): void {
         if (angle == 0 || speed <= 0) {
@@ -696,11 +791,25 @@ namespace smartMotor {
     }
 
     //% group="Robot"
-    //% block="drive %direction for %value %mode at %speed\\% %waitMode"
-    //% speed.min=1 speed.max=100 speed.defl=50 value.min=0
+    //% block="drive %direction for %value %mode at %speed\\% accel %accel %waitMode"
+    //% speed.min=1 speed.max=100 speed.defl=50 value.min=1 value.defl=1
+    //% accel.defl=smartMotor.AccelLevel.Medium
+    //% waitMode.defl=smartMotor.WaitMode.Wait
     //% inlineInputMode=inline
-    //% weight=76
-    /** 按时间、毫米或厘米发送一条固定双电机直行命令。 */
+    //% weight=75
+    /** Elecfreaks-compatible straight-drive block. V1 firmware uses PXT-side yaw correction; acceleration is reserved for protocol-compatible callers. */
+    export function robotDriveStraightWithAccel(direction: DriveDirection, value: number, mode: DriveMode, speed: number, accel: AccelLevel = AccelLevel.Medium, waitMode: WaitMode = 0): void {
+        normalizeAccelLevel(accel)
+        robotDriveStraight(direction, value, mode, speed, waitMode)
+    }
+
+    //% group="Robot"
+    //% block="drive %direction for %value %mode at %speed\\% %waitMode"
+    //% speed.min=1 speed.max=100 speed.defl=50 value.min=1 value.defl=1
+    //% waitMode.defl=smartMotor.WaitMode.Wait
+    //% inlineInputMode=inline
+    //% weight=74
+    /** 按时间、毫米或厘米使用板载Z轴角度修正直行航向。 */
     export function robotDriveStraight(direction: DriveDirection, value: number, mode: DriveMode, speed: number, waitMode: WaitMode = 0): void {
         if (value <= 0 || speed <= 0 || robotWheelDiameterMm <= 0) {
             return
@@ -717,46 +826,13 @@ namespace smartMotor {
         if (direction == DriveDirection.Backward) {
             movementX10 = -movementX10
         }
-        let leftValue = -movementX10
-        let rightValue = movementX10
-        let speedPercent = Math.round(clamp(speed, 1, 100))
-        let leftStart = pins.createBuffer(0)
-        let rightStart = pins.createBuffer(0)
         if (waitMode == WaitMode.Wait) {
-            leftStart = refreshMotorData(robotLeftMotor,
-                MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
-            rightStart = refreshMotorData(robotRightMotor,
-                MOTOR_DATA_REFRESH_ANGLE | MOTOR_DATA_REFRESH_SPEED)
-        }
-        let directionMask = 0
-        if (leftValue < 0) {
-            directionMask |= 0x01
-        }
-        if (rightValue < 0) {
-            directionMask |= 0x02
-        }
-        let leftValueX10 = Math.abs(leftValue)
-        let rightValueX10 = Math.abs(rightValue)
-        i2cCommandSend(COMMAND_ROBOT_MOVE, [
-            robotLeftMotor,
-            robotRightMotor,
-            turnMode,
-            (leftValueX10 >> 24) & 0xFF,
-            (leftValueX10 >> 16) & 0xFF,
-            (leftValueX10 >> 8) & 0xFF,
-            leftValueX10 & 0xFF,
-            (rightValueX10 >> 24) & 0xFF,
-            (rightValueX10 >> 16) & 0xFF,
-            (rightValueX10 >> 8) & 0xFF,
-            rightValueX10 & 0xFF,
-            speedPercent,
-            directionMask
-        ])
-        if (waitMode == WaitMode.Wait) {
-            waitForMotorFeedback(robotLeftMotor, leftStart, turnMode, leftValue,
-                speedPercent * 9, -1, TurnDirectionEx.ShortestPath)
-            waitForMotorFeedback(robotRightMotor, rightStart, turnMode, rightValue,
-                speedPercent * 9, -1, TurnDirectionEx.ShortestPath)
+            runRobotDriveStraightWithGyro(direction, movementX10, turnMode, speed, robotMotionId)
+        } else {
+            let motionId = robotMotionId
+            control.inBackground(function () {
+                runRobotDriveStraightWithGyro(direction, movementX10, turnMode, speed, motionId)
+            })
         }
     }
 
