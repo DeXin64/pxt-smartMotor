@@ -1,8 +1,8 @@
 //% color=#ff0011 icon="\uf1b9" block="Smart Motor"
 namespace smartMotor {
     const I2C_ADDRESS = 0x66
-    const I2C_REGISTER_PREPARE_DELAY_MS = 5
-    const MOTOR_DATA_REFRESH_DELAY_MS = 10
+    const I2C_QUERY_POLL_INTERVAL_MS = 2
+    const I2C_QUERY_TIMEOUT_MS = 100
     const COMMAND_REGISTER_READ = 0x01
     const COMMAND_MOTOR_DATA_REFRESH = 0x02
     const COMMAND_VERSION = 0x10
@@ -150,14 +150,14 @@ namespace smartMotor {
         return value < minimum ? minimum : value > maximum ? maximum : value
     }
 
-    /** 按参考工程方式忙等待短暂的I2C从机响应准备时间。 */
+    /** 按参考工程方式忙等待短暂的I2C命令接收或查询轮询间隔。 */
     function delayMs(ms: number): void {
         let endTime = input.runningTime() + ms
         while (endTime > input.runningTime()) {
         }
     }
 
-    /** 按Cutebot Pro协议发送一条I2C指令，并忙等待接收或查询数据准备。 */
+    /** 按Cutebot Pro协议发送一条I2C指令，并可忙等待指定接收时间。 */
     function i2cCommandSend(command: number, data: number[], delay: number = 1): void {
         let frame = pins.createBuffer(data.length + 4)
         frame[0] = 0xFF
@@ -171,26 +171,33 @@ namespace smartMotor {
         delayMs(delay)
     }
 
-    /** 通知下位机按需刷新请求范围，等待5ms后直接读取原始寄存器。 */
-    function readRegisters(startAddress: number, length: number): Buffer {
-        let requestLength = clamp(Math.round(length), 1, 24)
-        i2cCommandSend(COMMAND_REGISTER_READ, [startAddress, requestLength], I2C_REGISTER_PREPARE_DELAY_MS)
-        return pins.i2cReadBuffer(I2C_ADDRESS, requestLength)
+    /** 发送数据查询并每2ms读取有效标志，超时返回最后一次实际数据。 */
+    function i2cQueryRead(command: number, commandData: number[], dataLength: number): Buffer {
+        i2cCommandSend(command, commandData, 0)
+        let startTime = input.runningTime()
+        let data = pins.createBuffer(dataLength)
+        while (input.runningTime() - startTime < I2C_QUERY_TIMEOUT_MS) {
+            delayMs(I2C_QUERY_POLL_INTERVAL_MS)
+            let reply = pins.i2cReadBuffer(I2C_ADDRESS, dataLength + 1)
+            for (let index = 0; index < dataLength; index++) {
+                data[index] = reply[index + 1]
+            }
+            if (reply[0] == 1) {
+                return data
+            }
+        }
+        return data
     }
 
-    /** 请求下位机刷新单路电机数据，等待UART回复后直接读取最新记录。 */
+    /** 通知下位机按需刷新请求范围并轮询读取有效寄存器数据。 */
+    function readRegisters(startAddress: number, length: number): Buffer {
+        let requestLength = clamp(Math.round(length), 1, 24)
+        return i2cQueryRead(COMMAND_REGISTER_READ, [startAddress, requestLength], requestLength)
+    }
+
+    /** 请求下位机刷新单路电机数据并轮询读取完整记录。 */
     function refreshMotorData(motor: MotorPort, dataMask: number): Buffer {
-        i2cCommandSend(COMMAND_MOTOR_DATA_REFRESH, [motor, dataMask], MOTOR_DATA_REFRESH_DELAY_MS)
-        let motorData = pins.i2cReadBuffer(I2C_ADDRESS, MOTOR_DATA_RECORD_LENGTH)
-        if ((motorData[0] & dataMask) != dataMask) {
-            delayMs(5)
-            motorData = pins.i2cReadBuffer(I2C_ADDRESS, MOTOR_DATA_RECORD_LENGTH)
-        }
-        if ((motorData[0] & dataMask) != dataMask) {
-            delayMs(5)
-            motorData = pins.i2cReadBuffer(I2C_ADDRESS, MOTOR_DATA_RECORD_LENGTH)
-        }
-        return motorData
+        return i2cQueryRead(COMMAND_MOTOR_DATA_REFRESH, [motor, dataMask], MOTOR_DATA_RECORD_LENGTH)
     }
 
     /** 将任意0.1度角度归一化到0～3599。 */
@@ -735,7 +742,7 @@ namespace smartMotor {
     //% weight=68
     /** 清零板载陀螺仪X、Y、Z三轴累计角度，不清除动态校准数据。 */
     export function resetGyroAngle(): void {
-        i2cCommandSend(COMMAND_GYRO_RESET, [], I2C_REGISTER_PREPARE_DELAY_MS)
+        i2cCommandSend(COMMAND_GYRO_RESET, [])
     }
 
     //% group="Information"
@@ -743,11 +750,8 @@ namespace smartMotor {
     //% weight=60
     /** 读取下位机固件版本。 */
     export function readVersion(): string {
-        i2cCommandSend(COMMAND_VERSION, [])
-        let reply = pins.i2cReadBuffer(I2C_ADDRESS, 3)
-        return reply.length == 3
-            ? "V " + reply[0] + "." + reply[1] + "." + reply[2]
-            : "V 0.0.0"
+        let data = i2cQueryRead(COMMAND_VERSION, [], 3)
+        return "V " + data[0] + "." + data[1] + "." + data[2]
     }
 
     /** 读取指定电机当前锁存通信错误，不显示为积木。 */
