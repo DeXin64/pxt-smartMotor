@@ -3,6 +3,9 @@ namespace smartMotor {
     const I2C_ADDRESS = 0x66
     const I2C_QUERY_POLL_INTERVAL_MS = 2
     const I2C_QUERY_TIMEOUT_MS = 100
+    const GYRO_RESET_CONFIRM_TIMEOUT_MS = 350
+    const GYRO_RESET_CONFIRM_POLL_INTERVAL_MS = 10
+    const GYRO_RESET_CONFIRM_TOLERANCE_X10 = 1
     const COMMAND_REGISTER_READ = 0x01
     const COMMAND_MOTOR_DATA_REFRESH = 0x02
     const COMMAND_VERSION = 0x10
@@ -130,6 +133,9 @@ namespace smartMotor {
     let robotWheelDiameterMm = ROBOT_DEFAULT_WHEEL_DIAMETER_MM
     let robotMotionId = 0
     let robotTurnActive = false
+    let lastQueryWasSuccessful = false
+    let queryCacheKeys: string[] = []
+    let queryCacheData: Buffer[] = []
 
     /** 从小端字节流读取有符号16位值。 */
     function readI16Le(buffer: Buffer, offset: number): number {
@@ -150,10 +156,50 @@ namespace smartMotor {
         return value < minimum ? minimum : value > maximum ? maximum : value
     }
 
+    function copyBuffer(source: Buffer): Buffer {
+        let result = pins.createBuffer(source.length)
+        for (let index = 0; index < source.length; index++) {
+            result[index] = source[index]
+        }
+        return result
+    }
+
     /** 按参考工程方式忙等待短暂的I2C命令接收或查询轮询间隔。 */
     function delayMs(ms: number): void {
         let endTime = input.runningTime() + ms
         while (endTime > input.runningTime()) {
+        }
+    }
+
+    function queryCacheKey(command: number, commandData: number[], dataLength: number): string {
+        let key = "" + command
+        for (let index = 0; index < commandData.length; index++) {
+            key += ":" + commandData[index]
+        }
+        return key + ":" + dataLength
+    }
+
+    function findQueryCache(key: string): number {
+        for (let index = 0; index < queryCacheKeys.length; index++) {
+            if (queryCacheKeys[index] == key) {
+                return index
+            }
+        }
+        return -1
+    }
+
+    function readQueryCache(key: string, dataLength: number): Buffer {
+        let index = findQueryCache(key)
+        return index >= 0 ? copyBuffer(queryCacheData[index]) : pins.createBuffer(dataLength)
+    }
+
+    function writeQueryCache(key: string, data: Buffer): void {
+        let index = findQueryCache(key)
+        if (index < 0) {
+            queryCacheKeys.push(key)
+            queryCacheData.push(copyBuffer(data))
+        } else {
+            queryCacheData[index] = copyBuffer(data)
         }
     }
 
@@ -171,28 +217,40 @@ namespace smartMotor {
         delayMs(delay)
     }
 
-    /** 发送数据查询并每2ms读取有效标志，超时返回最后一次实际数据。 */
-    function i2cQueryRead(command: number, commandData: number[], dataLength: number): Buffer {
+    /** 发送数据查询并轮询有效标志，超时返回该查询最近一次有效数据。 */
+    function i2cQueryRead(command: number, commandData: number[], dataLength: number,
+        timeoutMs: number = I2C_QUERY_TIMEOUT_MS): Buffer {
+        let key = queryCacheKey(command, commandData, dataLength)
+        let cachedData = readQueryCache(key, dataLength)
+        lastQueryWasSuccessful = false
+        let deadline = input.runningTime() + Math.max(0, timeoutMs)
         i2cCommandSend(command, commandData, 0)
-        let startTime = input.runningTime()
-        let data = pins.createBuffer(dataLength)
-        while (input.runningTime() - startTime < I2C_QUERY_TIMEOUT_MS) {
-            delayMs(I2C_QUERY_POLL_INTERVAL_MS)
-            let reply = pins.i2cReadBuffer(I2C_ADDRESS, dataLength + 1)
-            for (let index = 0; index < dataLength; index++) {
-                data[index] = reply[index + 1]
+        while (input.runningTime() < deadline) {
+            let remainingMs = deadline - input.runningTime()
+            delayMs(Math.min(I2C_QUERY_POLL_INTERVAL_MS, remainingMs))
+            if (input.runningTime() >= deadline) {
+                break
             }
-            if (reply[0] == 1) {
+            let reply = pins.i2cReadBuffer(I2C_ADDRESS, dataLength + 1)
+            if (reply.length >= dataLength + 1 && reply[0] == 1) {
+                let data = pins.createBuffer(dataLength)
+                for (let index = 0; index < dataLength; index++) {
+                    data[index] = reply[index + 1]
+                }
+                writeQueryCache(key, data)
+                lastQueryWasSuccessful = true
                 return data
             }
         }
-        return data
+        return cachedData
     }
 
     /** 通知下位机按需刷新请求范围并轮询读取有效寄存器数据。 */
-    function readRegisters(startAddress: number, length: number): Buffer {
+    function readRegisters(startAddress: number, length: number,
+        timeoutMs: number = I2C_QUERY_TIMEOUT_MS): Buffer {
         let requestLength = clamp(Math.round(length), 1, 24)
-        return i2cQueryRead(COMMAND_REGISTER_READ, [startAddress, requestLength], requestLength)
+        return i2cQueryRead(COMMAND_REGISTER_READ, [startAddress, requestLength], requestLength,
+            timeoutMs)
     }
 
     /** 请求下位机刷新单路电机数据并轮询读取完整记录。 */
@@ -743,6 +801,21 @@ namespace smartMotor {
     /** 清零板载陀螺仪X、Y、Z三轴累计角度，不清除动态校准数据。 */
     export function resetGyroAngle(): void {
         i2cCommandSend(COMMAND_GYRO_RESET, [])
+        let deadline = input.runningTime() + GYRO_RESET_CONFIRM_TIMEOUT_MS
+        while (input.runningTime() < deadline) {
+            let data = readRegisters(REGISTER_GYRO_ANGLE_START, 12,
+                deadline - input.runningTime())
+            if (lastQueryWasSuccessful
+                && Math.abs(readI32Le(data, 0)) <= GYRO_RESET_CONFIRM_TOLERANCE_X10
+                && Math.abs(readI32Le(data, 4)) <= GYRO_RESET_CONFIRM_TOLERANCE_X10
+                && Math.abs(readI32Le(data, 8)) <= GYRO_RESET_CONFIRM_TOLERANCE_X10) {
+                return
+            }
+            let remainingMs = deadline - input.runningTime()
+            if (remainingMs > 0) {
+                delayMs(Math.min(GYRO_RESET_CONFIRM_POLL_INTERVAL_MS, remainingMs))
+            }
+        }
     }
 
     //% group="Information"
