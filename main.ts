@@ -361,10 +361,14 @@ namespace smartMotor {
         let baseSpeed = direction == DriveDirection.Backward ? -speedPercent : speedPercent
         let leftStart = pins.createBuffer(0)
         let rightStart = pins.createBuffer(0)
+        let leftStartAngle = 0
+        let rightStartAngle = 0
         let startMs = input.runningTime()
         if (!timedDrive) {
             leftStart = refreshFreshMotorData(robotLeftMotor, MOTOR_DATA_REFRESH_ANGLE)
             rightStart = refreshFreshMotorData(robotRightMotor, MOTOR_DATA_REFRESH_ANGLE)
+            leftStartAngle = readI32Le(leftStart, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
+            rightStartAngle = readI32Le(rightStart, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
         }
         let targetYaw = readFreshGyroAngle(GyroAxis.Yaw)
         let maxCorrection = clamp(speedPercent - 1, 0, ROBOT_DRIVE_GYRO_MAX_CORRECTION)
@@ -385,13 +389,11 @@ namespace smartMotor {
             } else {
                 let leftData = refreshFreshMotorData(robotLeftMotor, MOTOR_DATA_REFRESH_ANGLE)
                 let rightData = refreshFreshMotorData(robotRightMotor, MOTOR_DATA_REFRESH_ANGLE)
-                let leftStartAngle = readI32Le(leftStart, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
-                let rightStartAngle = readI32Le(rightStart, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
                 let leftAngle = readI32Le(leftData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
                 let rightAngle = readI32Le(rightData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
                 let leftTravel = Math.abs(leftAngle - leftStartAngle)
                 let rightTravel = Math.abs(rightAngle - rightStartAngle)
-                if (leftTravel >= Math.abs(movementX10) || rightTravel >= Math.abs(movementX10)) {
+                if (leftTravel >= Math.abs(movementX10) && rightTravel >= Math.abs(movementX10)) {
                     break
                 }
             }
