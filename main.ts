@@ -383,8 +383,8 @@ namespace smartMotor {
                     i2cCommandSend(COMMAND_STOP, [robotMotorMask()])
                     usingPulseApproach = true
                 }
-                sendMotorRelativeStep(robotLeftMotor, ROBOT_TURN_PULSE_STEP_DEGREES, pulseSignedSpeed)
-                sendMotorRelativeStep(robotRightMotor, ROBOT_TURN_PULSE_STEP_DEGREES, pulseSignedSpeed)
+                sendMotorRelativeStep(robotLeftMotor, ROBOT_TURN_PULSE_STEP_DEGREES, 20)
+                sendMotorRelativeStep(robotRightMotor, ROBOT_TURN_PULSE_STEP_DEGREES, 20)
             } else {
                 let signedTurnSpeed = positiveDirection ? turnSpeed : -turnSpeed
                 sendRobotSpeed(signedTurnSpeed, -signedTurnSpeed)
