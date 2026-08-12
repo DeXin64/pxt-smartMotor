@@ -1,1 +1,32 @@
-// 在此处测试；当此软件包作为插件使用时，将不会编译此软件包。
+smartMotor.motorStart(smartMotor.MotorPort.M5, smartMotor.MotorDirection.Clockwise, 100)
+smartMotor.motorStart(smartMotor.MotorPort.M8, smartMotor.MotorDirection.Counterclockwise, -100)
+smartMotor.motorStop(smartMotor.MotorPort.M5)
+
+smartMotor.motorReset(smartMotor.MotorPort.M6)
+smartMotor.motorMoveAbsolute(smartMotor.MotorPort.M6, -32768, -100)
+smartMotor.motorMoveAbsolute(smartMotor.MotorPort.M6, 32767, 100)
+smartMotor.motorMoveRelative(smartMotor.MotorPort.M7, -32768, -100)
+smartMotor.motorMoveRelative(smartMotor.MotorPort.M7, 32767, 100)
+
+smartMotor.robotSetWheelDiameter(0)
+smartMotor.robotSetWheelDiameter(10000)
+smartMotor.robotSetMotors(smartMotor.MotorPort.M5, smartMotor.MotorPort.M6)
+smartMotor.robotTurn(-360, 0, smartMotor.AccelLevel.Slow)
+smartMotor.robotTurn(360, 100, smartMotor.AccelLevel.Fast)
+smartMotor.robotDriveStraight(smartMotor.DriveDirection.Forward, 10000, smartMotor.DriveMode.Millimeters, smartMotor.AccelLevel.Medium)
+smartMotor.robotDriveStraight(smartMotor.DriveDirection.Backward, 10, smartMotor.DriveMode.Seconds, smartMotor.AccelLevel.Slow)
+smartMotor.robotDriveStraight(smartMotor.DriveDirection.Forward, 360, smartMotor.DriveMode.Degrees, smartMotor.AccelLevel.Fast)
+smartMotor.robotStop()
+
+let motorSpeed = smartMotor.motorGetSpeed(smartMotor.MotorPort.M5)
+let motorAbsoluteAngle = smartMotor.motorGetAbsoluteAngle(smartMotor.MotorPort.M6)
+let motorRelativeAngle = smartMotor.motorGetRelativeAngle(smartMotor.MotorPort.M7)
+
+smartMotor.resetGyroAngle()
+let pitchSpeed = smartMotor.readGyroAngularSpeed(smartMotor.GyroAxis.Pitch)
+let yawAngle = smartMotor.readGyroAngle(smartMotor.GyroAxis.Yaw)
+let rollAngle = smartMotor.readGyroAngle(smartMotor.GyroAxis.Roll)
+let firmwareVersion = smartMotor.readVersion()
+
+basic.showNumber(motorSpeed + motorAbsoluteAngle + motorRelativeAngle + pitchSpeed + yawAngle + rollAngle)
+basic.showString(firmwareVersion)

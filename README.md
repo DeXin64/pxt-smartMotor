@@ -1,30 +1,74 @@
 # pxt-smartmotor
 
-智控马达扩展盒的MakeCode扩展，上位机通过7位I2C地址`0x66`与N32G401下位机通信。
+Power Smart Motor Hub extension for MakeCode micro:bit.
 
-扩展盒只有在长按开机并进入正式工作状态后才响应I2C；启动确认、关机提示和USB充电待机状态访问`0x66`不会收到应答。
+The hub uses I2C address `0x66` and responds after it has entered its normal working state. In the simulator or when the hub is not connected, read blocks return safe default values such as `0` or `V 0.0.0`.
 
-## 功能
+## API
 
-- 积木接口参考`ESP32_SMALLMV/gp/Libraries/Elecfreaks/Motor.ubl`；
-- 四路单电机启动、停止、带等待归零、定圈、定度、定时和绝对角度运动；
-- 单电机速度、相对角度和单圈绝对角度读取；
-- 机器人轮径、左右轮、独立速度、PXT侧偏航角修正直行、转向、停止和偏航角积木；
-- 板载陀螺仪三轴累计角度读取、累计角度重置、三轴加速度和固件版本读取；
-- 电机读取和等待模式主动请求新角度/速度，通过更新序列、角度变化和目标角差判断完成，并带动态超时；
-- 电机在线状态不作为上位机积木或寄存器公开，内部心跳仍负责电机供电和控制安全。
+| Category | Block | TypeScript |
+| --- | --- | --- |
+| Motor | 电机 X1 方向为 X2，速度为 X3 启动 | `smartMotor.motorStart(motor, direction, speed)` |
+| Motor | 电机 X1 停止 | `smartMotor.motorStop(motor)` |
+| Position | 电机 X1 位置归零 | `smartMotor.motorReset(motor)` |
+| Position | 电机 X1 转动到绝对角度 X2，速度 X3 | `smartMotor.motorMoveAbsolute(motor, angle, speed)` |
+| Position | 电机 X1 转动角度为 X2，速度 X3 | `smartMotor.motorMoveRelative(motor, angle, speed)` |
+| Robot | 机器人车轮直径为 X1 毫米 | `smartMotor.robotSetWheelDiameter(diameter)` |
+| Robot | 机器人左轮 X1 和右轮 X2 | `smartMotor.robotSetMotors(leftMotor, rightMotor)` |
+| Robot | 机器人转向 X1 度，速度 X2，加速度 X3 | `smartMotor.robotTurn(angle, speed, accel)` |
+| Robot | 机器人朝 X1 直行 X2 X3，加速度 X4 | `smartMotor.robotDriveStraight(direction, value, mode, accel)` |
+| Robot | 机器人停止 | `smartMotor.robotStop()` |
+| Readings | 电机 X1 当前速度（度/秒） | `smartMotor.motorGetSpeed(motor)` |
+| Readings | 电机 X1 绝对角度 | `smartMotor.motorGetAbsoluteAngle(motor)` |
+| Readings | 电机 X1 相对角度 | `smartMotor.motorGetRelativeAngle(motor)` |
+| Gyroscope | 陀螺仪重置 | `smartMotor.resetGyroAngle()` |
+| Gyroscope | 陀螺仪 X1 角速度（°/s） | `smartMotor.readGyroAngularSpeed(axis)` |
+| Gyroscope | 陀螺仪 X1 角（°） | `smartMotor.readGyroAngle(axis)` |
+| Information | 固件版本号 | `smartMotor.readVersion()` |
 
-PID积木和PID控制功能不在本扩展中实现。
+## Parameters
 
-## 兼容性
+- Motor ports are `M5`, `M6`, `M7`, and `M8`.
+- Motor direction is clockwise or counterclockwise.
+- Motor speed is an integer from `-100` to `100`.
+- Absolute and relative motor angle blocks accept `-32768` to `32767` degrees.
+- Wheel diameter accepts `0` to `10000` millimeters.
+- Robot turn angle accepts `-360` to `360` degrees, and robot turn speed accepts `0` to `100`.
+- Robot straight mode is millimeters, seconds, or degrees. Acceleration is slow, medium, or fast.
+- Gyroscope axis is pitch, yaw, or roll. Angular speed is estimated from consecutive angle samples.
 
-扩展版本`1.0.0`对应首个稳定的Smart Motor Protocol V1基线。协议使用7位I2C地址`0x66`和`FF F9 command length data...`请求帧；查询回复、命令载荷、寄存器布局、超时缓存和异步陀螺仪复位语义见[Protocol V1](PROTOCOL.md)。
+## Example
 
-`1.0.0`只声明兼容基线，不改变现有用户积木API。仓库中的版本号更新不代表已经发布GitHub Release或创建Git标签。
+```typescript
+smartMotor.motorStart(smartMotor.MotorPort.M5, smartMotor.MotorDirection.Clockwise, 50)
+basic.pause(1000)
+smartMotor.motorStop(smartMotor.MotorPort.M5)
 
-## 用作扩展
+smartMotor.motorReset(smartMotor.MotorPort.M5)
+smartMotor.motorMoveRelative(smartMotor.MotorPort.M5, 90, 50)
+smartMotor.motorMoveAbsolute(smartMotor.MotorPort.M5, 180, 50)
 
-在MakeCode micro:bit的“扩展”页面搜索或导入：
+smartMotor.robotSetWheelDiameter(62)
+smartMotor.robotSetMotors(smartMotor.MotorPort.M5, smartMotor.MotorPort.M6)
+smartMotor.robotTurn(90, 50, smartMotor.AccelLevel.Medium)
+smartMotor.robotDriveStraight(smartMotor.DriveDirection.Forward, 200, smartMotor.DriveMode.Millimeters, smartMotor.AccelLevel.Medium)
+smartMotor.robotStop()
+
+let speed = smartMotor.motorGetSpeed(smartMotor.MotorPort.M5)
+let absoluteAngle = smartMotor.motorGetAbsoluteAngle(smartMotor.MotorPort.M5)
+let relativeAngle = smartMotor.motorGetRelativeAngle(smartMotor.MotorPort.M5)
+let yaw = smartMotor.readGyroAngle(smartMotor.GyroAxis.Yaw)
+let yawSpeed = smartMotor.readGyroAngularSpeed(smartMotor.GyroAxis.Yaw)
+let version = smartMotor.readVersion()
+```
+
+## Test
+
+Run `pxt build` in this extension directory. A pass means `main.ts`, `test.ts`, and localized block metadata compile for the micro:bit target.
+
+## Use as Extension
+
+Import this repository in MakeCode micro:bit:
 
 ```text
 https://github.com/zy2516/pxt-smartmotor
