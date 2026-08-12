@@ -26,7 +26,7 @@
     "smartMotor.robotSetWheelDiameter|block": "robot wheel diameter $diameter mm",
     "smartMotor.robotSetMotors|block": "robot left wheel $leftMotor and right wheel $rightMotor",
     "smartMotor.robotTurn|block": "robot turn $angle degrees speed $speed acceleration $accel $waitMode",
-    "smartMotor.robotDriveStraight|block": "robot drive $direction $value $mode speed level $accel",
+    "smartMotor.robotDriveStraight|block": "robot drive $direction $value $mode speed $speed acceleration $accel $waitMode",
     "smartMotor.robotStop|block": "robot stop",
     "smartMotor.robotIsIdle|block": "robot is idle",
     "smartMotor.motorGetSpeed|block": "motor $motor current speed (degrees/s)",
