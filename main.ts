@@ -357,7 +357,7 @@ namespace smartMotor {
             }
             let outputSpeed = Math.abs(error) < ROBOT_TURN_FINAL_APPROACH_DEGREES ? finalSpeed : turnSpeed
             let signedTurnSpeed = positiveDirection ? outputSpeed : -outputSpeed
-            sendRobotSpeed(signedTurnSpeed, signedTurnSpeed)
+            sendRobotSpeed(signedTurnSpeed, -signedTurnSpeed)
             basic.pause(MOTION_POLL_INTERVAL_MS)
         }
         robotStopIfCurrentMotion(motionId)
