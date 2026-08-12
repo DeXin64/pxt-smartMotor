@@ -31,7 +31,7 @@ The hub uses I2C address `0x66` and responds after it has entered its normal wor
 - Motor ports are `M5`, `M6`, `M7`, and `M8`.
 - Motor direction is clockwise or counterclockwise.
 - Motor speed is an integer from `-100` to `100`.
-- Absolute and relative motor angle blocks accept `-32768` to `32767` degrees.
+- Absolute and relative motor angle blocks accept `0` to `360` degrees.
 - Wheel diameter accepts `0` to `10000` millimeters.
 - Robot turn angle accepts `-360` to `360` degrees, and robot turn speed accepts `0` to `100`.
 - Robot straight mode is millimeters, seconds, or degrees. Acceleration is slow, medium, or fast.

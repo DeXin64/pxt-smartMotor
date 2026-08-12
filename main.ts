@@ -422,14 +422,14 @@ namespace smartMotor {
     //% group="Position"
     //% blockId=smartmotor_motor_move_absolute block="motor $motor rotate to absolute angle $angle speed $speed"
     //% motor.defl=smartMotor.MotorPort.M5
-    //% angle.min=-32768 angle.max=32767 angle.defl=90
+    //% angle.min=0 angle.max=360 angle.defl=90
     //% speed.min=-100 speed.max=100 speed.defl=50
     //% inlineInputMode=inline
     //% weight=89
     /**
      * Rotate a motor to an absolute angle.
      * @param motor motor port M5-M8
-     * @param angle target angle in degrees, -32768 to 32767
+     * @param angle target angle in degrees, 0 to 360
      * @param speed speed from -100 to 100
      */
     export function motorMoveAbsolute(motor: MotorPort, angle: number, speed: number): void {
@@ -451,14 +451,14 @@ namespace smartMotor {
     //% group="Position"
     //% blockId=smartmotor_motor_move_relative block="motor $motor rotate angle $angle speed $speed"
     //% motor.defl=smartMotor.MotorPort.M5
-    //% angle.min=-32768 angle.max=32767 angle.defl=90
+    //% angle.min=0 angle.max=360 angle.defl=90
     //% speed.min=-100 speed.max=100 speed.defl=50
     //% inlineInputMode=inline
     //% weight=88
     /**
      * Rotate a motor by a relative angle.
      * @param motor motor port M5-M8
-     * @param angle relative angle in degrees, -32768 to 32767
+     * @param angle relative angle in degrees, 0 to 360
      * @param speed speed from -100 to 100
      */
     export function motorMoveRelative(motor: MotorPort, angle: number, speed: number): void {
@@ -466,7 +466,7 @@ namespace smartMotor {
             return
         }
         cancelRobotMotion()
-        let valueX10 = Math.abs(Math.round(clamp(angle, -32768, 32767) * 10))
+        let valueX10 = Math.abs(Math.round(clamp(angle, 0, 360) * 10))
         let speedPercent = Math.abs(signedSpeed(speed))
         let reverse = signedSpeed(speed) < 0
         let counterclockwise = angle < 0

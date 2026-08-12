@@ -3,10 +3,10 @@ smartMotor.motorStart(smartMotor.MotorPort.M8, smartMotor.MotorDirection.Counter
 smartMotor.motorStop(smartMotor.MotorPort.M5)
 
 smartMotor.motorReset(smartMotor.MotorPort.M6)
-smartMotor.motorMoveAbsolute(smartMotor.MotorPort.M6, -32768, -100)
-smartMotor.motorMoveAbsolute(smartMotor.MotorPort.M6, 32767, 100)
-smartMotor.motorMoveRelative(smartMotor.MotorPort.M7, -32768, -100)
-smartMotor.motorMoveRelative(smartMotor.MotorPort.M7, 32767, 100)
+smartMotor.motorMoveAbsolute(smartMotor.MotorPort.M6, 0, -100)
+smartMotor.motorMoveAbsolute(smartMotor.MotorPort.M6, 360, 100)
+smartMotor.motorMoveRelative(smartMotor.MotorPort.M7, 0, -100)
+smartMotor.motorMoveRelative(smartMotor.MotorPort.M7, 360, 100)
 
 smartMotor.robotSetWheelDiameter(0)
 smartMotor.robotSetWheelDiameter(10000)
