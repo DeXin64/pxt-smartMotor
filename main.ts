@@ -381,7 +381,7 @@ namespace smartMotor {
             let yawError = targetYaw - currentYaw
             let correction = clamp(Math.round(yawError * ROBOT_DRIVE_GYRO_KP),
                 -maxCorrection, maxCorrection)
-            sendRobotSpeed(baseSpeed + correction, baseSpeed - correction)
+            sendRobotSpeed(baseSpeed + correction, -(baseSpeed - correction))
             if (timedDrive) {
                 if (input.runningTime() - startMs >= Math.abs(movementX10) * 100) {
                     break
@@ -393,9 +393,7 @@ namespace smartMotor {
                 let rightAngle = readI32Le(rightData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
                 let leftTravel = Math.abs(leftAngle - leftStartAngle)
                 let rightTravel = Math.abs(rightAngle - rightStartAngle)
-                if (leftTravel >= Math.abs(movementX10) || rightTravel >= Math.abs(movementX10)) {
-                    sendMotorRelativeStep(robotLeftMotor, 0, 30)
-                    sendMotorRelativeStep(robotRightMotor, 0, 30)
+                if (leftTravel >= Math.abs(movementX10) && rightTravel >= Math.abs(movementX10)) {
                     break
                 }
             }
