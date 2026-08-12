@@ -26,13 +26,8 @@ namespace smartMotor {
     const MOTOR_DATA_SPEED_OFFSET = 9
     const MOTOR_DATA_REFRESH_ANGLE = 0x01
     const MOTOR_DATA_REFRESH_SPEED = 0x02
-    const MOTION_MIN_TIMEOUT_MS = 2000
-    const MOTION_POLL_INTERVAL_MS = 20
-    const MOTION_MAX_TIMEOUT_MS = 60000
     const ROBOT_DRIVE_GYRO_KP = 2
     const ROBOT_DRIVE_GYRO_MAX_CORRECTION = 35
-    const ROBOT_DRIVE_TARGET_TOLERANCE_X10 = 15
-    const ROBOT_SENSOR_MAX_MISSES = 3
     const ROBOT_INVALID_GYRO_ANGLE = 1000000000
     const ROBOT_DEFAULT_WHEEL_DIAMETER_MM = 62
 
@@ -318,17 +313,6 @@ namespace smartMotor {
         return 60
     }
 
-    function motionTimeoutMs(valueX10: number, timedMotion: boolean, speedValue: number): number {
-        let estimatedMs = timedMotion
-            ? Math.abs(valueX10) * 100
-            : Math.abs(valueX10) * 100 / clamp(speedValue, 1, 900)
-        return clamp(Math.round(estimatedMs * 2 + 2000), MOTION_MIN_TIMEOUT_MS, MOTION_MAX_TIMEOUT_MS)
-    }
-
-    function timedDriveDurationMs(valueX10: number): number {
-        return clamp(Math.round(Math.abs(valueX10) * 100), 0, MOTION_MAX_TIMEOUT_MS)
-    }
-
     function robotStopIfCurrentMotion(motionId: number): void {
         if (motionId == robotMotionId) {
             i2cCommandSend(COMMAND_STOP, [robotMotorMask()])
@@ -368,19 +352,6 @@ namespace smartMotor {
         robotStopIfCurrentMotion(motionId)
     }
 
-    function motorTravelReached(startData: Buffer, currentData: Buffer, targetX10: number): boolean {
-        if (startData.length != MOTOR_DATA_RECORD_LENGTH
-            || currentData.length != MOTOR_DATA_RECORD_LENGTH
-            || (startData[0] & MOTOR_DATA_ANGLE_VALID) == 0
-            || (currentData[0] & MOTOR_DATA_ANGLE_VALID) == 0) {
-            return false
-        }
-        let startAngleX10 = readI32Le(startData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
-        let currentAngleX10 = readI32Le(currentData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
-        return Math.abs(currentAngleX10 - startAngleX10)
-            + ROBOT_DRIVE_TARGET_TOLERANCE_X10 >= targetX10
-    }
-
     function runRobotDriveStraight(direction: DriveDirection, movementX10: number, timedDrive: boolean,
         speed: number, motionId: number): void {
         if (motionId != robotMotionId) {
@@ -388,76 +359,43 @@ namespace smartMotor {
         }
         let speedPercent = Math.round(clamp(speed, 1, 100))
         let baseSpeed = direction == DriveDirection.Backward ? -speedPercent : speedPercent
-        let targetTravelX10 = Math.abs(movementX10)
         let leftStart = pins.createBuffer(0)
         let rightStart = pins.createBuffer(0)
+        let startMs = input.runningTime()
         if (!timedDrive) {
             leftStart = refreshFreshMotorData(robotLeftMotor, MOTOR_DATA_REFRESH_ANGLE)
             rightStart = refreshFreshMotorData(robotRightMotor, MOTOR_DATA_REFRESH_ANGLE)
-            if (leftStart.length != MOTOR_DATA_RECORD_LENGTH || rightStart.length != MOTOR_DATA_RECORD_LENGTH) {
-                robotStopIfCurrentMotion(motionId)
-                return
-            }
-            if (motionId != robotMotionId) {
-                return
-            }
         }
         let targetYaw = readFreshGyroAngle(GyroAxis.Yaw)
-        if (!gyroAngleIsValid(targetYaw)) {
-            robotStopIfCurrentMotion(motionId)
-            return
-        }
-        if (motionId != robotMotionId) {
-            return
-        }
-        // Robot drive keeps the PXT-side yaw correction loop on 0x26 instead of 0x27
-        // because protocol V1 has no command ACK or completion/failure state for 0x27.
-        let timeoutMs = timedDrive
-            ? timedDriveDurationMs(targetTravelX10)
-            : motionTimeoutMs(targetTravelX10, false, speedPercent * 9)
         let maxCorrection = clamp(speedPercent - 1, 0, ROBOT_DRIVE_GYRO_MAX_CORRECTION)
         robotDriveActive = true
-        let startMs = input.runningTime()
-        let yawMisses = 0
-        let motorMisses = 0
-        while (input.runningTime() - startMs < timeoutMs) {
+        while (true) {
             if (motionId != robotMotionId) {
                 return
             }
             let currentYaw = readFreshGyroAngle(GyroAxis.Yaw)
-            if (!gyroAngleIsValid(currentYaw)) {
-                yawMisses++
-                if (yawMisses >= ROBOT_SENSOR_MAX_MISSES) {
-                    robotStopIfCurrentMotion(motionId)
-                    return
-                }
-                basic.pause(MOTION_POLL_INTERVAL_MS)
-                continue
-            }
-            yawMisses = 0
             let yawError = targetYaw - currentYaw
             let correction = clamp(Math.round(yawError * ROBOT_DRIVE_GYRO_KP),
                 -maxCorrection, maxCorrection)
             sendRobotSpeed(baseSpeed + correction, baseSpeed - correction)
-            if (!timedDrive) {
+            if (timedDrive) {
+                if (input.runningTime() - startMs >= Math.abs(movementX10) * 100) {
+                    break
+                }
+            } else {
                 let leftData = refreshFreshMotorData(robotLeftMotor, MOTOR_DATA_REFRESH_ANGLE)
                 let rightData = refreshFreshMotorData(robotRightMotor, MOTOR_DATA_REFRESH_ANGLE)
-                if (leftData.length != MOTOR_DATA_RECORD_LENGTH || rightData.length != MOTOR_DATA_RECORD_LENGTH) {
-                    motorMisses++
-                    if (motorMisses >= ROBOT_SENSOR_MAX_MISSES) {
-                        robotStopIfCurrentMotion(motionId)
-                        return
-                    }
-                    basic.pause(MOTION_POLL_INTERVAL_MS)
-                    continue
-                }
-                motorMisses = 0
-                if (motorTravelReached(leftStart, leftData, targetTravelX10)
-                    && motorTravelReached(rightStart, rightData, targetTravelX10)) {
+                let leftStartAngle = readI32Le(leftStart, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
+                let rightStartAngle = readI32Le(rightStart, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
+                let leftAngle = readI32Le(leftData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
+                let rightAngle = readI32Le(rightData, MOTOR_DATA_RELATIVE_ANGLE_OFFSET)
+                let leftTravel = Math.abs(leftAngle - leftStartAngle)
+                let rightTravel = Math.abs(rightAngle - rightStartAngle)
+                if (leftTravel >= Math.abs(movementX10) || rightTravel >= Math.abs(movementX10)) {
                     break
                 }
             }
-            basic.pause(MOTION_POLL_INTERVAL_MS)
+            basic.pause(10)
         }
         robotStopIfCurrentMotion(motionId)
     }
