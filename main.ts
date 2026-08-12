@@ -34,7 +34,7 @@ namespace smartMotor {
     const ROBOT_DRIVE_GYRO_MAX_CORRECTION = 35
     const ROBOT_DRIVE_TARGET_TOLERANCE_X10 = 15
     const ROBOT_SENSOR_MAX_MISSES = 3
-    const ROBOT_TURN_SLOWDOWN_DEGREES = 25
+    const ROBOT_TURN_FINAL_APPROACH_DEGREES = 10
     const ROBOT_INVALID_GYRO_ANGLE = 1000000000
     const ROBOT_DEFAULT_WHEEL_DIAMETER_MM = 62
 
@@ -319,16 +319,6 @@ namespace smartMotor {
         }
     }
 
-    function turnSpeedForError(requestedSpeed: number, accel: AccelLevel, errorDegrees: number): number {
-        let maxSpeed = clamp(Math.abs(requestedSpeed), 1, 100)
-        let minSpeed = Math.max(1, Math.round(maxSpeed * speedForLevel(accel) / 100))
-        let scaledSpeed = maxSpeed
-        if (Math.abs(errorDegrees) < ROBOT_TURN_SLOWDOWN_DEGREES) {
-            scaledSpeed = Math.round(maxSpeed * Math.abs(errorDegrees) / ROBOT_TURN_SLOWDOWN_DEGREES)
-        }
-        return clamp(scaledSpeed, minSpeed, maxSpeed)
-    }
-
     function runRobotTurn(angle: number, speed: number, accel: AccelLevel, motionId: number): void {
         if (motionId != robotMotionId) {
             return
@@ -341,37 +331,33 @@ namespace smartMotor {
         if (motionId != robotMotionId) {
             return
         }
-        let targetYaw = startYaw + angle
+        let target = angle
         let positiveDirection = angle > 0
         robotTurnActive = true
         let startMs = input.runningTime()
         let timeoutMs = motionTimeoutMs(Math.round(Math.abs(angle) * 10), false,
             clamp(Math.abs(speed), 1, 100) * 9)
-        let sensorMisses = 0
+        let turnSpeed = clamp(Math.abs(speed), 1, 100)
+        let finalSpeed = Math.max(1, Math.round(turnSpeed * speedForLevel(accel) / 100))
         while (input.runningTime() - startMs < timeoutMs) {
             if (motionId != robotMotionId) {
                 return
             }
             let currentYaw = readFreshGyroAngle(GyroAxis.Yaw)
             if (!gyroAngleIsValid(currentYaw)) {
-                sensorMisses++
-                if (sensorMisses >= ROBOT_SENSOR_MAX_MISSES) {
-                    robotStopIfCurrentMotion(motionId)
-                    return
-                }
-                basic.pause(MOTION_POLL_INTERVAL_MS)
-                continue
+                robotStopIfCurrentMotion(motionId)
+                return
             }
-            sensorMisses = 0
-            let error = targetYaw - currentYaw
+            let current = currentYaw - startYaw
+            let error = target - current
             if (Math.abs(error) <= ROBOT_TURN_TOLERANCE_DEGREES
-                || (positiveDirection && error < 0)
-                || (!positiveDirection && error > 0)) {
+                || (positiveDirection && current >= target)
+                || (!positiveDirection && current <= target)) {
                 break
             }
-            let turnSpeed = turnSpeedForError(speed, accel, error)
-            sendRobotSpeed(positiveDirection ? turnSpeed : -turnSpeed,
-                positiveDirection ? -turnSpeed : turnSpeed)
+            let outputSpeed = Math.abs(error) < ROBOT_TURN_FINAL_APPROACH_DEGREES ? finalSpeed : turnSpeed
+            sendRobotSpeed(positiveDirection ? outputSpeed : -outputSpeed,
+                positiveDirection ? -outputSpeed : outputSpeed)
             basic.pause(MOTION_POLL_INTERVAL_MS)
         }
         robotStopIfCurrentMotion(motionId)
@@ -619,7 +605,7 @@ namespace smartMotor {
      * Turn the robot in place using gyroscope feedback.
      * @param angle turn angle in degrees, -360 to 360
      * @param speed speed from 0 to 100
-     * @param accel speed level used as the minimum final-approach turn speed
+     * @param accel speed level used only for the final approach speed
      */
     export function robotTurn(angle: number, speed: number, accel: AccelLevel): void {
         cancelRobotMotion()
