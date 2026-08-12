@@ -34,7 +34,8 @@ namespace smartMotor {
     const ROBOT_DRIVE_GYRO_MAX_CORRECTION = 35
     const ROBOT_DRIVE_TARGET_TOLERANCE_X10 = 15
     const ROBOT_SENSOR_MAX_MISSES = 3
-    const ROBOT_TURN_FINAL_APPROACH_DEGREES = 10
+    const ROBOT_TURN_PULSE_APPROACH_DEGREES = 10
+    const ROBOT_TURN_PULSE_STEP_DEGREES = 1
     const ROBOT_INVALID_GYRO_ANGLE = 1000000000
     const ROBOT_DEFAULT_WHEEL_DIAMETER_MM = 62
 
@@ -290,6 +291,26 @@ namespace smartMotor {
         ])
     }
 
+    function sendMotorRelativeStep(motor: MotorPort, angle: number, speed: number): void {
+        if (angle == 0 || speed == 0) {
+            return
+        }
+        let valueX10 = Math.abs(Math.round(clamp(angle, 0, 360) * 10))
+        let speedPercent = Math.abs(signedSpeed(speed))
+        let reverse = signedSpeed(speed) < 0
+        let counterclockwise = angle < 0
+        i2cCommandSend(COMMAND_MOVE, [
+            motor,
+            2,
+            (valueX10 >> 24) & 0xFF,
+            (valueX10 >> 16) & 0xFF,
+            (valueX10 >> 8) & 0xFF,
+            valueX10 & 0xFF,
+            speedPercent,
+            reverse != counterclockwise ? 1 : 0
+        ])
+    }
+
     function speedForLevel(accel: AccelLevel): number {
         if (accel == AccelLevel.Slow) {
             return 35
@@ -338,7 +359,9 @@ namespace smartMotor {
         let timeoutMs = motionTimeoutMs(Math.round(Math.abs(angle) * 10), false,
             clamp(Math.abs(speed), 1, 100) * 9)
         let turnSpeed = clamp(Math.abs(speed), 1, 100)
-        let finalSpeed = Math.max(1, Math.round(turnSpeed * speedForLevel(accel) / 100))
+        let pulseSpeed = Math.max(1, Math.round(turnSpeed * speedForLevel(accel) / 100))
+        let pulseSignedSpeed = positiveDirection ? -pulseSpeed : pulseSpeed
+        let usingPulseApproach = false
         while (input.runningTime() - startMs < timeoutMs) {
             if (motionId != robotMotionId) {
                 return
@@ -354,9 +377,18 @@ namespace smartMotor {
                 || current >= target) {
                 break
             }
-            let outputSpeed = Math.abs(error) < ROBOT_TURN_FINAL_APPROACH_DEGREES ? finalSpeed : turnSpeed
-            let signedTurnSpeed = positiveDirection ? outputSpeed : -outputSpeed
-            sendRobotSpeed(signedTurnSpeed, -signedTurnSpeed)
+            if (Math.abs(error) <= ROBOT_TURN_PULSE_APPROACH_DEGREES) {
+                if (!usingPulseApproach) {
+                    // Stop the continuous 0x26 turn before pulse steps, but keep this motion active.
+                    i2cCommandSend(COMMAND_STOP, [robotMotorMask()])
+                    usingPulseApproach = true
+                }
+                sendMotorRelativeStep(robotLeftMotor, ROBOT_TURN_PULSE_STEP_DEGREES, pulseSignedSpeed)
+                sendMotorRelativeStep(robotRightMotor, ROBOT_TURN_PULSE_STEP_DEGREES, pulseSignedSpeed)
+            } else {
+                let signedTurnSpeed = positiveDirection ? turnSpeed : -turnSpeed
+                sendRobotSpeed(signedTurnSpeed, -signedTurnSpeed)
+            }
             basic.pause(MOTION_POLL_INTERVAL_MS)
         }
         robotStopIfCurrentMotion(motionId)
@@ -547,20 +579,7 @@ namespace smartMotor {
             return
         }
         cancelRobotMotion()
-        let valueX10 = Math.abs(Math.round(clamp(angle, 0, 360) * 10))
-        let speedPercent = Math.abs(signedSpeed(speed))
-        let reverse = signedSpeed(speed) < 0
-        let counterclockwise = angle < 0
-        i2cCommandSend(COMMAND_MOVE, [
-            motor,
-            2,
-            (valueX10 >> 24) & 0xFF,
-            (valueX10 >> 16) & 0xFF,
-            (valueX10 >> 8) & 0xFF,
-            valueX10 & 0xFF,
-            speedPercent,
-            reverse != counterclockwise ? 1 : 0
-        ])
+        sendMotorRelativeStep(motor, angle, speed)
     }
 
     //% group="Robot"
@@ -594,7 +613,7 @@ namespace smartMotor {
     }
 
     //% group="Robot"
-    //% blockId=smartmotor_robot_turn block="robot turn $angle degrees speed $speed speed level $accel"
+    //% blockId=smartmotor_robot_turn block="robot turn $angle degrees speed $speed pulse level $accel"
     //% angle.min=-360 angle.max=360 angle.defl=90
     //% speed.min=0 speed.max=100 speed.defl=50
     //% accel.defl=smartMotor.AccelLevel.Medium
@@ -604,7 +623,7 @@ namespace smartMotor {
      * Turn the robot in place using gyroscope feedback.
      * @param angle turn angle in degrees, -360 to 360
      * @param speed speed from 0 to 100
-     * @param accel speed level used only for the final approach speed
+     * @param accel speed level used for the final 1-degree pulse approach
      */
     export function robotTurn(angle: number, speed: number, accel: AccelLevel): void {
         cancelRobotMotion()
