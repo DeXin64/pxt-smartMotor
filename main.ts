@@ -79,6 +79,14 @@ namespace smartMotor {
         Fast = 2
     }
 
+    /** Whether a robot command waits until the motion is complete. */
+    export enum WaitMode {
+        //% block="do not wait"
+        NoWait = 0,
+        //% block="wait until done"
+        Wait = 1
+    }
+
     /** Gyroscope attitude axis. */
     export enum GyroAxis {
         //% block="pitch"
@@ -95,6 +103,14 @@ namespace smartMotor {
     let robotMotionId = 0
     let robotTurnActive = false
     let robotDriveActive = false
+    let robotWorkerStarted = false
+    let robotTurnMotionId = 0
+    let robotTurnTargetYaw = 0
+    let robotTurnCurrentSpeed = 0
+    let robotTurnMaxSpeed = 0
+    let robotTurnLastError = 0
+    let robotTurnLastTime = 0
+    let robotTurnAccel = AccelLevel.Medium
     let lastQueryWasSuccessful = false
     let queryCacheKeys: string[] = []
     let queryCacheData: Buffer[] = []
@@ -313,6 +329,16 @@ namespace smartMotor {
         return 60
     }
 
+    function turnAccelerationForLevel(accel: AccelLevel): number {
+        if (accel == AccelLevel.Slow) {
+            return 25
+        }
+        if (accel == AccelLevel.Fast) {
+            return 300
+        }
+        return 60
+    }
+
     function robotStopIfCurrentMotion(motionId: number): void {
         if (motionId == robotMotionId) {
             i2cCommandSend(COMMAND_STOP, [robotMotorMask()])
@@ -321,35 +347,65 @@ namespace smartMotor {
         }
     }
 
-    function runRobotTurn(angle: number, speed: number, _accel: AccelLevel, motionId: number): void {
-        if (motionId != robotMotionId) {
+    function updateRobotTurn(): void {
+        if (!robotTurnActive || robotTurnMotionId != robotMotionId) {
             return
         }
-        let startYaw = readFreshGyroAngle(GyroAxis.Yaw)
-        let target = Math.abs(angle)
-        let positiveDirection = angle > 0
-        robotTurnActive = true
-        let turnSpeed = clamp(Math.abs(speed), 1, 100)
-        while (true) {
-            if (motionId != robotMotionId) {
-                return
-            }
-            let currentYaw = readFreshGyroAngle(GyroAxis.Yaw)
-            let current = Math.abs(currentYaw - startYaw)
-            let error = target - current
-            if (Math.abs(error) <= 1 || current >= target) {
-                break
-            }
-            if (Math.abs(error) <= 10) {
-                sendMotorRelativeStep(robotLeftMotor, 1, 30)
-                sendMotorRelativeStep(robotRightMotor, 1, 30)
-            } else {
-                let signedTurnSpeed = positiveDirection ? turnSpeed : -turnSpeed
-                sendRobotSpeed(signedTurnSpeed, -signedTurnSpeed)
-            }
-            basic.pause(10)
+
+        let now = input.runningTime()
+        let elapsed = now - robotTurnLastTime
+        if (elapsed <= 0) {
+            return
         }
-        robotStopIfCurrentMotion(motionId)
+        robotTurnLastTime = now
+
+        let error = robotTurnTargetYaw - readFreshGyroAngle(GyroAxis.Yaw)
+        let crossedTarget = (robotTurnLastError > 0 && error <= 0)
+            || (robotTurnLastError < 0 && error >= 0)
+        if (Math.abs(error) <= 1 || crossedTarget) {
+            robotStopIfCurrentMotion(robotTurnMotionId)
+            return
+        }
+
+        let dt = elapsed / 1000
+        let derivative = dt <= 0.2 ? (error - robotTurnLastError) / dt : 0
+        robotTurnLastError = error
+
+        let minimumSpeed = Math.min(8, robotTurnMaxSpeed)
+        let allowedSpeed = robotTurnMaxSpeed
+        if (Math.abs(error) < 30) {
+            allowedSpeed = Math.max(minimumSpeed,
+                robotTurnMaxSpeed * Math.abs(error) / 30)
+        }
+
+        let acceleration = turnAccelerationForLevel(robotTurnAccel)
+        if (robotTurnCurrentSpeed < allowedSpeed) {
+            robotTurnCurrentSpeed = Math.min(allowedSpeed,
+                robotTurnCurrentSpeed + acceleration * dt)
+        } else if (robotTurnCurrentSpeed > allowedSpeed) {
+            robotTurnCurrentSpeed = Math.max(allowedSpeed,
+                robotTurnCurrentSpeed - acceleration * 2 * dt)
+        }
+
+        let output = clamp(0.35 * error + 0.015 * derivative,
+            -robotTurnCurrentSpeed, robotTurnCurrentSpeed)
+        if (output * error <= 0 || Math.abs(output) < minimumSpeed) {
+            output = error > 0 ? minimumSpeed : -minimumSpeed
+        }
+        sendRobotSpeed(output, -output)
+    }
+
+    function startRobotWorker(): void {
+        if (robotWorkerStarted) {
+            return
+        }
+        robotWorkerStarted = true
+        control.inBackground(function () {
+            while (true) {
+                updateRobotTurn()
+                basic.pause(9)
+            }
+        })
     }
 
     function runRobotDriveStraight(direction: DriveDirection, movementX10: number, timedDrive: boolean,
@@ -527,26 +583,44 @@ namespace smartMotor {
     }
 
     //% group="Robot"
-    //% blockId=smartmotor_robot_turn block="robot turn $angle degrees speed $speed pulse level $accel"
+    //% blockId=smartmotor_robot_turn block="robot turn $angle degrees speed $speed acceleration $accel $waitMode"
     //% angle.min=-360 angle.max=360 angle.defl=90
     //% speed.min=0 speed.max=100 speed.defl=50
     //% accel.defl=smartMotor.AccelLevel.Medium
+    //% waitMode.defl=smartMotor.WaitMode.Wait
     //% inlineInputMode=inline
     //% weight=78
     /**
      * Turn the robot in place using gyroscope feedback.
      * @param angle turn angle in degrees, -360 to 360
      * @param speed speed from 0 to 100
-     * @param accel kept for block compatibility; not used by this simplified turn path
+     * @param accel acceleration level used by the turn speed ramp
+     * @param waitMode wait for completion or return after starting the background motion
      */
-    export function robotTurn(angle: number, speed: number, accel: AccelLevel): void {
+    export function robotTurn(angle: number, speed: number, accel: AccelLevel,
+        waitMode: WaitMode = WaitMode.Wait): void {
         cancelRobotMotion()
         let turnAngle = clamp(angle, -360, 360)
         let turnSpeed = clamp(speed, 0, 100)
         if (turnAngle == 0 || turnSpeed <= 0) {
             return
         }
-        runRobotTurn(turnAngle, turnSpeed, accel, robotMotionId)
+
+        robotTurnMotionId = robotMotionId
+        robotTurnTargetYaw = readFreshGyroAngle(GyroAxis.Yaw) + turnAngle
+        robotTurnCurrentSpeed = 8
+        robotTurnMaxSpeed = Math.abs(turnSpeed)
+        robotTurnLastError = turnAngle
+        robotTurnLastTime = input.runningTime()
+        robotTurnAccel = accel
+        robotTurnActive = true
+        startRobotWorker()
+
+        if (waitMode == WaitMode.Wait) {
+            while (robotTurnActive && robotTurnMotionId == robotMotionId) {
+                basic.pause(10)
+            }
+        }
     }
 
     //% group="Robot"
@@ -590,6 +664,16 @@ namespace smartMotor {
     export function robotStop(): void {
         cancelRobotMotion(false)
         i2cCommandSend(COMMAND_STOP, [robotMotorMask()])
+    }
+
+    //% group="Robot"
+    //% blockId=smartmotor_robot_is_idle block="robot is idle"
+    //% weight=75
+    /**
+     * Check whether the robot has no active turn or straight-drive motion.
+     */
+    export function robotIsIdle(): boolean {
+        return !robotTurnActive && !robotDriveActive
     }
 
     //% group="Readings"
