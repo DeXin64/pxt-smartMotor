@@ -394,6 +394,8 @@ namespace smartMotor {
                 let leftTravel = Math.abs(leftAngle - leftStartAngle)
                 let rightTravel = Math.abs(rightAngle - rightStartAngle)
                 if (leftTravel >= Math.abs(movementX10) && rightTravel >= Math.abs(movementX10)) {
+                    sendMotorRelativeStep(robotLeftMotor, 0, 30)
+                    sendMotorRelativeStep(robotRightMotor, 0, 30)
                     break
                 }
             }
