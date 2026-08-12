@@ -381,7 +381,7 @@ namespace smartMotor {
             let yawError = targetYaw - currentYaw
             let correction = clamp(Math.round(yawError * ROBOT_DRIVE_GYRO_KP),
                 -maxCorrection, maxCorrection)
-            sendRobotSpeed(baseSpeed + correction, -(baseSpeed - correction))
+            sendRobotSpeed(baseSpeed - correction, baseSpeed + correction)
             if (timedDrive) {
                 if (input.runningTime() - startMs >= Math.abs(movementX10) * 100) {
                     break
