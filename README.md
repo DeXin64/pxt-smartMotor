@@ -15,8 +15,8 @@ The hub uses I2C address `0x66` and responds after it has entered its normal wor
 | Position | 电机 X1 转动角度为 X2，速度 X3 | `smartMotor.motorMoveRelative(motor, angle, speed)` |
 | Robot | 机器人车轮直径为 X1 毫米 | `smartMotor.robotSetWheelDiameter(diameter)` |
 | Robot | 机器人左轮 X1 和右轮 X2 | `smartMotor.robotSetMotors(leftMotor, rightMotor)` |
-| Robot | 机器人转向 X1 度，速度 X2，加速度 X3 | `smartMotor.robotTurn(angle, speed, accel)` |
-| Robot | 机器人朝 X1 直行 X2 X3，加速度 X4 | `smartMotor.robotDriveStraight(direction, value, mode, accel)` |
+| Robot | 机器人转向 X1 度，速度 X2，速度等级 X3 | `smartMotor.robotTurn(angle, speed, accel)` |
+| Robot | 机器人朝 X1 直行 X2 X3，速度等级 X4 | `smartMotor.robotDriveStraight(direction, value, mode, accel)` |
 | Robot | 机器人停止 | `smartMotor.robotStop()` |
 | Readings | 电机 X1 当前速度（度/秒） | `smartMotor.motorGetSpeed(motor)` |
 | Readings | 电机 X1 绝对角度 | `smartMotor.motorGetAbsoluteAngle(motor)` |
@@ -33,9 +33,17 @@ The hub uses I2C address `0x66` and responds after it has entered its normal wor
 - Motor speed is an integer from `-100` to `100`.
 - Absolute and relative motor angle blocks accept `0` to `360` degrees.
 - Wheel diameter accepts `0` to `10000` millimeters.
-- Robot turn angle accepts `-360` to `360` degrees, and robot turn speed accepts `0` to `100`.
-- Robot straight mode is millimeters, seconds, or degrees. Acceleration is slow, medium, or fast.
+- Robot turn angle accepts `-360` to `360` degrees, and speed accepts `0` to `100`. The speed level is used as the minimum final-approach turn speed: slow/medium/fast means about 35%/60%/85% of the requested speed.
+- Robot straight mode is millimeters, seconds, or wheel degrees. Its speed level is a fixed speed preset: slow/medium/fast maps to 35%/60%/85% speed, not a full acceleration ramp.
+- Seconds mode drives for the requested number of seconds, capped by the internal safety timeout. Millimeters mode uses the configured wheel diameter; the default is `62` mm.
 - Gyroscope axis is pitch, yaw, or roll. Angular speed is estimated from consecutive angle samples.
+
+## Robot Motion Notes
+
+- `robotTurn` and `robotDriveStraight` cancel any previous robot turn/drive command before checking their own parameters. A zero angle, zero speed, zero distance, or invalid wheel diameter therefore acts as a safe no-move command that also stops the previous robot motion.
+- Robot motion uses PXT-side feedback loops: command `0x26` sends left/right wheel speeds, yaw and motor-angle queries provide feedback, and command `0x21` requests stop on completion, timeout, cancellation, or repeated sensor-query failures.
+- The extension does not currently use protocol command `0x27` for dual-motor measured movement. Keeping the `0x26` loop preserves yaw correction and visible stop/error handling while protocol V1 has no ACK or completion/failure status for `0x27`.
+- Control commands have no ACK. Source code can show that stop commands are sent, but only hardware testing can prove actual stop latency, turn direction, distance accuracy, and wheel mounting assumptions such as the left-wheel sign inversion.
 
 ## Example
 
@@ -51,7 +59,8 @@ smartMotor.motorMoveAbsolute(smartMotor.MotorPort.M5, 180, 50)
 smartMotor.robotSetWheelDiameter(62)
 smartMotor.robotSetMotors(smartMotor.MotorPort.M5, smartMotor.MotorPort.M6)
 smartMotor.robotTurn(90, 50, smartMotor.AccelLevel.Medium)
-smartMotor.robotDriveStraight(smartMotor.DriveDirection.Forward, 200, smartMotor.DriveMode.Millimeters, smartMotor.AccelLevel.Medium)
+smartMotor.robotDriveStraight(smartMotor.DriveDirection.Forward, 100, smartMotor.DriveMode.Millimeters, smartMotor.AccelLevel.Medium)
+smartMotor.robotDriveStraight(smartMotor.DriveDirection.Forward, 5, smartMotor.DriveMode.Seconds, smartMotor.AccelLevel.Slow)
 smartMotor.robotStop()
 
 let speed = smartMotor.motorGetSpeed(smartMotor.MotorPort.M5)
