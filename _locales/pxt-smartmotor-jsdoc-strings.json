@@ -4,7 +4,7 @@
     "smartMotor.MotorDirection": "Motor rotation direction.",
     "smartMotor.DriveDirection": "Robot straight-drive direction.",
     "smartMotor.DriveMode": "Unit or mode used by the robot straight-drive block.",
-    "smartMotor.AccelLevel": "Robot speed level.",
+    "smartMotor.AccelLevel": "Robot acceleration or speed preset level, depending on the command.",
     "smartMotor.WaitMode": "Whether a robot command waits until the motion is complete.",
     "smartMotor.GyroAxis": "Gyroscope attitude axis.",
     "smartMotor.motorStart": "Start a motor with the selected direction and signed speed.",

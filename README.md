@@ -43,7 +43,8 @@ The hub uses I2C address `0x66` and responds after it has entered its normal wor
 ## Robot Motion Notes
 
 - `robotTurn` and `robotDriveStraight` cancel any previous robot turn/drive command before checking their own parameters. A zero angle, zero speed, zero distance, or invalid wheel diameter therefore acts as a safe no-move command that also stops the previous robot motion.
-- `robotTurn` starts a background state machine that reads yaw about every `9` milliseconds, applies PD control and acceleration/deceleration, sends left/right wheel speeds through command `0x26`, and sends command `0x21` when it reaches or crosses the target. It does not use motor relative-angle command `0x22` for final approach.
+- `robotTurn` starts a background state machine that pauses `9` milliseconds between control updates, reads yaw, applies PD control and acceleration/deceleration, sends left/right wheel speeds through command `0x26`, and sends command `0x21` when it reaches or crosses the target. It does not use motor relative-angle command `0x22` for final approach.
+- The turn controller reverses the raw yaw sign to match this controller board's QMI8658 mounting direction. The public `readGyroAngle(Yaw)` block still returns the firmware's original yaw value.
 - `robotDriveStraight` keeps its current PXT-side loop and uses yaw correction plus motor-angle or elapsed-time stopping. These simplified motion loops do not add a motion timeout or repeated sensor-query failure counter.
 - The extension does not currently use protocol command `0x27` for dual-motor measured movement. Keeping the `0x26` loop preserves yaw correction and visible stop/error handling while protocol V1 has no ACK or completion/failure status for `0x27`.
 - Control commands have no ACK. Source code can show that stop commands are sent, but only hardware testing can prove actual stop latency, turn direction, distance accuracy, and wheel mounting assumptions such as the left-wheel sign inversion.

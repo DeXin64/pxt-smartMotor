@@ -69,7 +69,7 @@ namespace smartMotor {
         Degrees = 2
     }
 
-    /** Robot speed level. */
+    /** Robot acceleration or speed preset level, depending on the command. */
     export enum AccelLevel {
         //% block="slow"
         Slow = 0,
@@ -242,6 +242,10 @@ namespace smartMotor {
         return angle != ROBOT_INVALID_GYRO_ANGLE
     }
 
+    function readRobotTurnYaw(): number {
+        return -readFreshGyroAngle(GyroAxis.Yaw)
+    }
+
     function refreshFreshMotorData(motor: MotorPort, dataMask: number): Buffer {
         let data = refreshMotorData(motor, dataMask)
         return lastQueryWasSuccessful ? data : pins.createBuffer(0)
@@ -359,7 +363,7 @@ namespace smartMotor {
         }
         robotTurnLastTime = now
 
-        let error = robotTurnTargetYaw - readFreshGyroAngle(GyroAxis.Yaw)
+        let error = robotTurnTargetYaw - readRobotTurnYaw()
         let crossedTarget = (robotTurnLastError > 0 && error <= 0)
             || (robotTurnLastError < 0 && error >= 0)
         if (Math.abs(error) <= 1 || crossedTarget) {
@@ -607,7 +611,7 @@ namespace smartMotor {
         }
 
         robotTurnMotionId = robotMotionId
-        robotTurnTargetYaw = readFreshGyroAngle(GyroAxis.Yaw) + turnAngle
+        robotTurnTargetYaw = readRobotTurnYaw() + turnAngle
         robotTurnCurrentSpeed = 8
         robotTurnMaxSpeed = Math.abs(turnSpeed)
         robotTurnLastError = turnAngle

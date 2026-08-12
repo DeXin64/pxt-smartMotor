@@ -4,7 +4,7 @@
     "smartMotor.MotorDirection": "电机转动方向。",
     "smartMotor.DriveDirection": "机器人直行方向。",
     "smartMotor.DriveMode": "机器人直行积木使用的单位或模式。",
-    "smartMotor.AccelLevel": "机器人速度等级。",
+    "smartMotor.AccelLevel": "根据命令表示机器人的加速度等级或速度预设。",
     "smartMotor.WaitMode": "机器人命令是否等待运动完成。",
     "smartMotor.GyroAxis": "陀螺仪姿态轴。",
     "smartMotor.motorStart": "按指定方向和有符号速度启动电机。",
