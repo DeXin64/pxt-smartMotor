@@ -331,7 +331,7 @@ namespace smartMotor {
         if (motionId != robotMotionId) {
             return
         }
-        let target = angle
+        let target = Math.abs(angle)
         let positiveDirection = angle > 0
         robotTurnActive = true
         let startMs = input.runningTime()
@@ -348,11 +348,10 @@ namespace smartMotor {
                 robotStopIfCurrentMotion(motionId)
                 return
             }
-            let current = currentYaw - startYaw
+            let current = Math.abs(currentYaw - startYaw)
             let error = target - current
             if (Math.abs(error) <= ROBOT_TURN_TOLERANCE_DEGREES
-                || (positiveDirection && current >= target)
-                || (!positiveDirection && current <= target)) {
+                || current >= target) {
                 break
             }
             let outputSpeed = Math.abs(error) < ROBOT_TURN_FINAL_APPROACH_DEGREES ? finalSpeed : turnSpeed
