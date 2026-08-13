@@ -7,6 +7,7 @@
     "smartMotor.AccelLevel": "机器人加速度等级。",
     "smartMotor.WaitMode": "机器人命令是否等待运动完成。",
     "smartMotor.GyroAxis": "陀螺仪姿态轴。",
+    "smartMotor.GyroMirror": "机器人陀螺仪转向方向。",
     "smartMotor.motorStart": "按指定方向和有符号速度启动电机。",
     "smartMotor.motorStart|param|motor": "电机端口 M5-M8",
     "smartMotor.motorStart|param|direction": "顺时针或逆时针方向",
@@ -28,6 +29,9 @@
     "smartMotor.robotSetMotors": "设置机器人左轮和右轮使用的电机。",
     "smartMotor.robotSetMotors|param|leftMotor": "左轮电机端口 M5-M8",
     "smartMotor.robotSetMotors|param|rightMotor": "右轮电机端口 M5-M8",
+    "smartMotor.robotSetGyro": "设置机器人转向和直行校正使用的陀螺仪轴和方向。",
+    "smartMotor.robotSetGyro|param|axis": "俯仰、偏航或横滚轴",
+    "smartMotor.robotSetGyro|param|mirror": "正常或镜像方向",
     "smartMotor.robotTurn": "使用陀螺仪反馈让机器人原地转向。",
     "smartMotor.robotTurn|param|angle": "转向角度，单位为度，-360 到 360",
     "smartMotor.robotTurn|param|speed": "速度，0 到 100",
@@ -50,8 +54,8 @@
     "smartMotor.motorGetRelativeAngle|param|motor": "电机端口 M5-M8",
     "smartMotor.resetGyroAngle": "重置陀螺仪姿态角。",
     "smartMotor.readGyroAngularSpeed": "读取陀螺仪角速度，单位为度每秒。",
-    "smartMotor.readGyroAngularSpeed|param|axis": "俯仰、航偏或翻滚轴",
+    "smartMotor.readGyroAngularSpeed|param|axis": "俯仰、偏航或横滚轴",
     "smartMotor.readGyroAngle": "读取陀螺仪姿态角，单位为度。",
-    "smartMotor.readGyroAngle|param|axis": "俯仰、航偏或翻滚轴",
+    "smartMotor.readGyroAngle|param|axis": "俯仰、偏航或横滚轴",
     "smartMotor.readVersion": "读取控制器固件版本号。"
 }

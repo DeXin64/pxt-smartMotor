@@ -95,9 +95,19 @@ namespace smartMotor {
         Roll = 1
     }
 
+    /** Whether the robot gyroscope angle is mirrored for steering control. */
+    export enum GyroMirror {
+        //% block="normal"
+        Normal = 0,
+        //% block="mirrored"
+        Mirrored = 1
+    }
+
     let robotLeftMotor = MotorPort.M5
     let robotRightMotor = MotorPort.M6
     let robotWheelDiameterMm = ROBOT_DEFAULT_WHEEL_DIAMETER_MM
+    let robotGyroAxis = GyroAxis.Yaw
+    let robotGyroMirror = GyroMirror.Mirrored
     let robotMotionId = 0
     let robotTurnActive = false
     let robotDriveActive = false
@@ -252,8 +262,9 @@ namespace smartMotor {
         return angle != ROBOT_INVALID_GYRO_ANGLE
     }
 
-    function readRobotTurnYaw(): number {
-        return -readFreshGyroAngle(GyroAxis.Yaw)
+    function readRobotControlAngle(): number {
+        let angle = readFreshGyroAngle(robotGyroAxis)
+        return robotGyroMirror == GyroMirror.Mirrored ? -angle : angle
     }
 
     function refreshFreshMotorData(motor: MotorPort, dataMask: number): Buffer {
@@ -373,7 +384,7 @@ namespace smartMotor {
         }
         robotTurnLastTime = now
 
-        let error = robotTurnTargetYaw - readRobotTurnYaw()
+        let error = robotTurnTargetYaw - readRobotControlAngle()
         let crossedTarget = (robotTurnLastError > 0 && error <= 0)
             || (robotTurnLastError < 0 && error >= 0)
         if (Math.abs(error) <= 1 || crossedTarget) {
@@ -471,7 +482,7 @@ namespace smartMotor {
             robotDriveCurrentSpeed = 8
         }
 
-        let error = robotDriveTargetYaw - readRobotTurnYaw()
+        let error = robotDriveTargetYaw - readRobotControlAngle()
         robotDriveIntegral = clamp(robotDriveIntegral + error * dt, -40, 40)
         let derivative = (error - robotDriveLastError) / dt
         robotDriveLastError = error
@@ -621,13 +632,29 @@ namespace smartMotor {
     }
 
     //% group="Robot"
+    //% blockId=smartmotor_robot_set_gyro block="robot gyroscope axis $axis mirror $mirror"
+    //% axis.defl=smartMotor.GyroAxis.Yaw
+    //% mirror.defl=smartMotor.GyroMirror.Mirrored
+    //% weight=78
+    /**
+     * Select the gyroscope axis and direction used by robot turn and straight-drive correction.
+     * @param axis pitch, yaw, or roll axis
+     * @param mirror normal or mirrored direction
+     */
+    export function robotSetGyro(axis: GyroAxis, mirror: GyroMirror): void {
+        cancelRobotMotion()
+        robotGyroAxis = axis
+        robotGyroMirror = mirror
+    }
+
+    //% group="Robot"
     //% blockId=smartmotor_robot_turn block="robot turn $angle degrees speed $speed acceleration $accel $waitMode"
     //% angle.min=-360 angle.max=360 angle.defl=90
     //% speed.min=0 speed.max=100 speed.defl=50
     //% accel.defl=smartMotor.AccelLevel.Medium
     //% waitMode.defl=smartMotor.WaitMode.Wait
     //% inlineInputMode=inline
-    //% weight=78
+    //% weight=77
     /**
      * Turn the robot in place using gyroscope feedback.
      * @param angle turn angle in degrees, -360 to 360
@@ -645,7 +672,7 @@ namespace smartMotor {
         }
 
         robotTurnMotionId = robotMotionId
-        robotTurnTargetYaw = readRobotTurnYaw() + turnAngle
+        robotTurnTargetYaw = readRobotControlAngle() + turnAngle
         robotTurnCurrentSpeed = 8
         robotTurnMaxSpeed = Math.abs(turnSpeed)
         robotTurnLastError = turnAngle
@@ -670,7 +697,7 @@ namespace smartMotor {
     //% accel.defl=smartMotor.AccelLevel.Medium
     //% waitMode.defl=smartMotor.WaitMode.Wait
     //% inlineInputMode=inline
-    //% weight=77
+    //% weight=76
     /**
      * Drive the robot straight using a distance, time, or wheel-angle value.
      * @param direction forward or backward
@@ -718,7 +745,7 @@ namespace smartMotor {
         robotDriveMaxSpeed = driveSpeed * 0.9
         robotDriveLastError = 0
         robotDriveIntegral = 0
-        robotDriveTargetYaw = readRobotTurnYaw()
+        robotDriveTargetYaw = readRobotControlAngle()
         robotDriveLastTime = input.runningTime()
         robotDriveAccel = accel
         robotDriveActive = true
