@@ -331,6 +331,10 @@ namespace smartMotor {
         return speed < 0 ? -mapped : mapped
     }
 
+    function truncateTowardZero(value: number): number {
+        return value < 0 ? Math.ceil(value) : Math.floor(value)
+    }
+
     function sendMotorRelativeStep(motor: MotorPort, angle: number, speed: number): void {
         if (angle == 0 || speed == 0) {
             return
@@ -394,7 +398,8 @@ namespace smartMotor {
         let error = robotTurnTargetYaw - readRobotControlAngle()
         let crossedTarget = (robotTurnLastError > 0 && error <= 0)
             || (robotTurnLastError < 0 && error >= 0)
-        if (Math.abs(error) <= 1 || crossedTarget) {
+        let stopTolerance = 1 + Math.max(0, robotTurnMaxSpeed - 50) / 50
+        if (Math.abs(error) <= stopTolerance || crossedTarget) {
             robotStopIfCurrentMotion(robotTurnMotionId)
             return
         }
@@ -403,12 +408,10 @@ namespace smartMotor {
         let derivative = dt <= 0.2 ? (error - robotTurnLastError) / dt : 0
         robotTurnLastError = error
 
-        let minimumSpeed = Math.min(8, robotTurnMaxSpeed)
         let brakingAngle = 30
         let allowedSpeed = robotTurnMaxSpeed
         if (Math.abs(error) < brakingAngle) {
-            allowedSpeed = Math.max(minimumSpeed,
-                robotTurnMaxSpeed * Math.abs(error) / brakingAngle)
+            allowedSpeed = robotTurnMaxSpeed * Math.abs(error) / brakingAngle
         }
 
         let acceleration = turnAccelerationForLevel(robotTurnAccel)
@@ -426,6 +429,7 @@ namespace smartMotor {
             output = error > 0 ? 0.01 : -0.01
         }
         output = mapRobotTurnMotorSpeed(output)
+        output = truncateTowardZero(output)
         sendRobotSpeed(output, -output)
     }
 
