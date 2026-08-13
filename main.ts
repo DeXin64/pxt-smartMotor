@@ -386,10 +386,11 @@ namespace smartMotor {
         robotTurnLastError = error
 
         let minimumSpeed = Math.min(8, robotTurnMaxSpeed)
+        let brakingAngle = 30 + Math.max(0, robotTurnMaxSpeed - 50)
         let allowedSpeed = robotTurnMaxSpeed
-        if (Math.abs(error) < 30) {
+        if (Math.abs(error) < brakingAngle) {
             allowedSpeed = Math.max(minimumSpeed,
-                robotTurnMaxSpeed * Math.abs(error) / 30)
+                robotTurnMaxSpeed * Math.abs(error) / brakingAngle)
         }
 
         let acceleration = turnAccelerationForLevel(robotTurnAccel)
