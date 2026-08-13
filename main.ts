@@ -324,6 +324,13 @@ namespace smartMotor {
         ])
     }
 
+    function mapRobotTurnMotorSpeed(speed: number): number {
+        let deadZone = 8
+        let magnitude = clamp(Math.abs(speed), 0, 100)
+        let mapped = deadZone + magnitude * (100 - deadZone) / 100
+        return speed < 0 ? -mapped : mapped
+    }
+
     function sendMotorRelativeStep(motor: MotorPort, angle: number, speed: number): void {
         if (angle == 0 || speed == 0) {
             return
@@ -397,7 +404,7 @@ namespace smartMotor {
         robotTurnLastError = error
 
         let minimumSpeed = Math.min(8, robotTurnMaxSpeed)
-        let brakingAngle = 30 + Math.max(0, robotTurnMaxSpeed - 50)
+        let brakingAngle = 30
         let allowedSpeed = robotTurnMaxSpeed
         if (Math.abs(error) < brakingAngle) {
             allowedSpeed = Math.max(minimumSpeed,
@@ -415,9 +422,10 @@ namespace smartMotor {
 
         let output = clamp(0.35 * error + 0.015 * derivative,
             -robotTurnCurrentSpeed, robotTurnCurrentSpeed)
-        if (output * error <= 0 || Math.abs(output) < minimumSpeed) {
-            output = error > 0 ? minimumSpeed : -minimumSpeed
+        if (output * error <= 0) {
+            output = error > 0 ? 0.01 : -0.01
         }
+        output = mapRobotTurnMotorSpeed(output)
         sendRobotSpeed(output, -output)
     }
 
